@@ -1,0 +1,6 @@
+#!/bin/sh
+# Usage: review-verify-clean <review_dir>  -> fails if the reviewer changed anything (tamper evidence).
+set -u
+cd "$1" || exit 2
+if [ -n "$(git status --porcelain --untracked-files=all | grep -v '^?? .review/')" ]; then echo "REVIEWER MODIFIED FILES:"; git status --porcelain; exit 1; fi
+echo "review checkout clean"

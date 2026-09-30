@@ -1,0 +1,23 @@
+# Paths are REPO-RELATIVE. Finalize after G0/E0 layout; verify with the G0 merge-control test PRs. Secondary signal only: risk-gate enforces founder approval.
+# CODEOWNERS guarantees approval from at least ONE listed owner — "both founders" is enforced
+# by the exchange repo ruleset (2 required approvals), not by this file.
+
+# ---- game repo (example layout) ----
+/migrations/            @founder-a @founder-b
+/api/src/auth/          @founder-a @founder-b
+/api/src/admin/         @founder-a @founder-b
+/api/src/groups/        @founder-a @founder-b
+/api/src/questions/     @founder-a @founder-b
+/api/src/scoring/       @founder-a @founder-b
+/api/src/users/         @founder-a @founder-b
+/api/src/notify/        @founder-a @founder-b
+/.github/               @founder-a @founder-b
+/.claude/               @founder-a @founder-b
+/.gitmodules            @founder-a @founder-b
+/Cargo.lock             @founder-a @founder-b
+/package-lock.json      @founder-a @founder-b
+/deny.toml              @founder-a @founder-b
+/CODEOWNERS             @founder-a @founder-b
+
+# ---- exchange repo ----
+# *  @founder-a @founder-b     (plus ruleset: 2 required approvals)

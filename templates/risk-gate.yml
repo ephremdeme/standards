@@ -1,0 +1,28 @@
+# .github/workflows/risk-gate.yml — make "risk-gate" a REQUIRED status check in the ruleset.
+name: risk-gate
+on:
+  pull_request: { types: [opened, synchronize, reopened, ready_for_review] }
+  pull_request_review: { types: [submitted, dismissed, edited] }
+permissions:
+  contents: read
+  pull-requests: read
+jobs:
+  risk-gate:
+    runs-on: ubuntu-latest
+    env:
+      REQUIRED_APPROVALS: "1"            # exchange repo: "2"
+      FOUNDERS: "founder-a,founder-b"    # GitHub logins
+    steps:
+      - uses: actions/checkout@<FULL_SHA> # v4
+        with: { fetch-depth: 0, submodules: true, persist-credentials: false }
+      - name: classify and check approvals on the current head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          level=$(sh standards/bin/classify-risk "$BASE" "$HEAD")
+          gh api --paginate "repos/${{ github.repository }}/pulls/$PR/reviews" --jq '.' | jq -s 'add' > reviews.json
+          sh standards/bin/risk-gate "$level" "$HEAD" reviews.json "$REQUIRED_APPROVALS" "$FOUNDERS"
+# Note: the workflow file itself, standards/, and risk-lowlist.txt are HIGH paths — changes to them need founder approval.

@@ -1,0 +1,16 @@
+#!/bin/sh
+# Usage: classify-risk <base> <head>   (run inside the repo)  -> prints LOW or HIGH, lists HIGH paths
+# Judged on the ACTUAL diff incl. new, deleted and renamed files. Default = HIGH.
+set -u
+base=$1; head=$2; dir=$(dirname "$0"); level=LOW
+paths=$(git diff --name-status --find-renames "$base" "$head" | awk -F'\t' '{for(i=2;i<=NF;i++) print $i}')
+[ -z "$paths" ] && { echo LOW; exit 0; }
+for p in $paths; do
+  ok=0
+  while IFS= read -r pat; do
+    case "$pat" in ''|'#'*) continue;; esac
+    case "$p" in $pat) ok=1; break;; esac
+  done < "$dir/risk-lowlist.txt"
+  [ $ok -eq 0 ] && { level=HIGH; echo "high: $p" >&2; }
+done
+echo $level

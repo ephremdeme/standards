@@ -1,0 +1,9 @@
+# Decisions — append-only; never edit; supersede with a new entry
+<!-- - D-NNN | YYYY-MM-DD | **headline.** body | why | revisit-when -->
+- D-001 | 2026-09-30 | **Harness.** Lanes in worktrees, milestone instrument proven red first, two-vendor review on HIGH lanes, one fix round, integration branch per milestone, founders approve milestone PRs on business logic. | Measured lessons from a prior production project + our reviews | If founder review load or defect escape rate is poor after G2
+- D-002 | 2026-09-30 | **Stack.** Rust (Axum, SQLx) + PostgreSQL; React + TS + Vite single SPA incl. /admin. | Compile-time checks suit agent-written code; one UI stack | G1 slips > 1 week due to iteration speed
+- D-003 | 2026-09-30 | **Repos.** game, exchange separate; standards pinned as submodule; hub sibling for messages. | Isolation, sellable exchange | —
+- D-004 | 2026-09-30 | **Integration branch per milestone, both repos.** Game: 1 founder approves; exchange: 2 founders, business-logic review. | Fewer approvals; combined review sees seams; founders review logic, machines + reviewers review lines | Escaped defects in exchange
+- D-005 | 2026-09-30 | **Exchange built now, second priority; pauses if game slips late November.** | Founder decision | —
+- D-006 | 2026-09-30 | **Growth in free phase:** participation + hot streaks, opt-in reminders in December; streak freezes/referrals/pundit in January. | Retention is what December must prove; referral rewards invite fake accounts | Abuse controls ready
+- D-007 | 2026-09-30 | **DeepSeek V4.1 Flash replaces GLM 5.3 for LOW lanes (game only).** Runs through Claude Code on DeepSeek's Anthropic-compatible endpoint; exchange repo marked `.no-deepseek`. | Metered API removes the coding-plan automation question; cheaper; cross-vendor with Claude reviewers | Quality of LOW lanes (reviewer rejection rate) or data/IP concerns

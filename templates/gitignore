@@ -1,0 +1,11 @@
+/target/
+node_modules/
+/web/dist/
+
+.review/
+.env
+.env.*
+!.env.example
+.worktrees/
+.lane-run.log
+.lane-check.log

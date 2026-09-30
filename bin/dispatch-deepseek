@@ -1,0 +1,30 @@
+#!/bin/sh
+# Usage: standards/bin/dispatch-deepseek <ABS_WORKTREE> [effort: high|max]
+# Runs a LOW-risk lane headless: Claude Code harness, DeepSeek model. Env vars follow DeepSeek's official guide
+# (api-docs.deepseek.com/quick_start/agent_integrations/claude_code); effort defaults to high (guide uses max).
+# Web tools disabled: lanes need none, and DeepSeek web search adds token cost and injection surface.
+# DeepSeek settings exist ONLY in this process. Never used for HIGH lanes or for repos marked .no-deepseek.
+set -eu
+wt=${1:?absolute worktree path}; effort=${2:-high}
+[ -n "${DS_API_KEY:-}" ] || { echo "dispatch-deepseek: DS_API_KEY not set" >&2; exit 2; }
+top=$(git -C "$wt" rev-parse --show-toplevel)
+[ -f "$top/.no-deepseek" ] && { echo "dispatch-deepseek: refused — this repo never sends code to DeepSeek" >&2; exit 2; }
+grep -qx 'Risk: LOW' "$wt/TASK.md" || { echo "dispatch-deepseek: refused — TASK is not Risk: LOW" >&2; exit 2; }
+[ "$(git -C "$wt" branch --show-current)" = "$(sed -n 's/^Branch: //p' "$wt/TASK.md")" ] || { echo "dispatch-deepseek: branch mismatch" >&2; exit 2; }
+brief=$(sed "s|<ABS_WORKTREE>|$wt|g" "$wt/standards/prompts/dispatch-brief.md")
+cd "$wt"
+env -u ANTHROPIC_API_KEY \
+  ANTHROPIC_BASE_URL="https://api.deepseek.com/anthropic" \
+  ANTHROPIC_AUTH_TOKEN="$DS_API_KEY" \
+  ANTHROPIC_MODEL="deepseek-flash[1m]" \
+  ANTHROPIC_DEFAULT_OPUS_MODEL="deepseek-flash[1m]" \
+  ANTHROPIC_DEFAULT_SONNET_MODEL="deepseek-flash[1m]" \
+  ANTHROPIC_DEFAULT_HAIKU_MODEL="deepseek-flash" \
+  CLAUDE_CODE_SUBAGENT_MODEL="deepseek-flash" \
+  CLAUDE_CODE_EFFORT_LEVEL="$effort" \
+  CLAUDE_CODE_AUTO_COMPACT_WINDOW=786432 \
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+  claude -p "$brief" --permission-mode acceptEdits --disallowedTools WebSearch WebFetch > .lane-run.log 2>&1 || true
+# Verify on bytes, not on the report:
+if standards/bin/check > .lane-check.log 2>&1; then echo "check: OK"; else echo "check: FAILED (see .lane-check.log)"; exit 1; fi
+tail -n 20 .lane-run.log   # final report only; never read full transcripts

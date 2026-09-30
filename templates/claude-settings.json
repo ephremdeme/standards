@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "additionalDirectories": ["../hub"],
+    "allow": [
+      "Bash(standards/bin/check)",
+      "Bash(scripts/verify/:*)",
+      "Bash(standards/bin/classify-risk:*)",
+      "Bash(cargo fmt:*)", "Bash(cargo clippy:*)", "Bash(cargo nextest:*)", "Bash(cargo test:*)", "Bash(cargo sqlx:*)",
+      "Bash(npx --no-install vitest:*)", "Bash(npx --no-install tsc:*)", "Bash(npx --no-install biome:*)",
+      "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git add:*)", "Bash(git commit:*)"
+    ],
+    "deny": [
+      "Read(./.env)", "Read(./.env.*)", "Read(**/*.pem)", "Read(**/*.key)", "Read(~/.ssh/**)", "Read(~/.config/gh/**)",
+      "Edit(standards/**)", "Write(standards/**)",
+      "Bash(git push:*)", "Bash(git stash:*)", "Bash(pkill:*)", "Bash(git worktree:*)", "Bash(git reset --hard:*)", "Bash(git submodule:*)", "Bash(rm -rf:*)",
+      "Bash(docker:*)", "Bash(curl:*)", "Bash(wget:*)", "Bash(ssh:*)", "Bash(scp:*)", "Bash(gh:*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      { "matcher": "Edit|Write|MultiEdit",
+        "hooks": [ { "type": "command", "command": "standards/bin/format-file.sh" } ] }
+    ]
+  }
+}

@@ -1,0 +1,2 @@
+# Takeover brief (previous agent died mid-lane)
+The previous agent on this lane stopped. Its uncommitted and WIP work is in <ABS_WORKTREE>. Treat it as someone else's work: audit every change against TASK.md, keep what is correct, fix or remove what isn't. Follow standards/prompts/dispatch-brief.md rules. Run TASK §5, commit as §6, report as usual plus a list of what you kept, changed and removed.

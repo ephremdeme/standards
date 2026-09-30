@@ -1,0 +1,14 @@
+#!/bin/sh
+# Required status check logic. Usage: risk-gate <LOW|HIGH> <head_sha> <reviews.json> <required_approvals> <founder1,founder2>
+# reviews.json = GitHub "list reviews for a pull request" response.
+# HIGH passes only if >= required distinct founders' LATEST review is APPROVED *on head_sha*.
+set -u
+level=$1; head=$2; reviews=$3; need=$4; founders=$5
+[ "$level" = LOW ] && { echo "risk-gate: LOW, no founder approval needed"; exit 0; }
+n=$(node -e '
+const [f,head,founders]=process.argv.slice(1); const r=require(f); const F=founders.split(",");
+const latest={}; for (const x of r) { if(!F.includes(x.user.login)) continue; if (x.state==="COMMENTED") continue; latest[x.user.login]=x; }
+console.log(Object.values(latest).filter(x=>x.state==="APPROVED" && x.commit_id===head).length);
+' "$reviews" "$head" "$founders")
+if [ "$n" -ge "$need" ]; then echo "risk-gate: HIGH, $n/$need founder approvals on $head"; exit 0; fi
+echo "risk-gate: HIGH, only $n/$need founder approvals on current head $head"; exit 1

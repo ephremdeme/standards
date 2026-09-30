@@ -1,0 +1,11 @@
+#!/bin/sh
+# Usage: review-checkout <repo_path> <base_sha> <head_sha> <task_id>
+# Disposable clone for a reviewer: no remotes, no credentials, diff precomputed in .review/diff.patch.
+# Reviewer agents get Read/Grep/Glob only (no Bash, no Edit/Write) and use this dir as working dir.
+set -eu
+src=$1; base=$2; head=$3; id=$4; dst=${TMPDIR:-/tmp}/review-$id
+rm -rf "$dst"; git clone -q --no-local "$src" "$dst"; cd "$dst"
+git checkout -q "$head"; git remote remove origin
+mkdir -p .review; git diff "$base" "$head" > .review/diff.patch
+git diff --name-status "$base" "$head" > .review/files.txt
+echo "$dst"

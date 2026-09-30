@@ -1,0 +1,8 @@
+# ALLOWLIST: a change is LOW only if EVERY changed path (added, modified, deleted, renamed-from and renamed-to)
+# matches one of these shell patterns. Anything else — including brand-new files anywhere — is HIGH.
+docs/*
+*.md
+web/src/components/*
+web/src/styles/*
+web/src/i18n/keys/*
+web/public/*

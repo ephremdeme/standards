@@ -1,0 +1,40 @@
+# Reusable workflow. Product repos call it with:
+#   jobs: { ci: { uses: <org>/standards/.github/workflows/rust-ci.yml@main } }
+name: rust-ci
+on: { workflow_call: {} }
+# Security: least-privilege token; pin every third-party action to a full commit SHA
+# (keep the version in a comment; let Dependabot/Renovate update them). Never use
+# pull_request_target to run PR code. No production secrets in CI.
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env: { POSTGRES_PASSWORD: postgres }
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      SQLX_OFFLINE: "true"
+    steps:
+      - uses: actions/checkout@<FULL_SHA> # v4
+      - uses: dtolnay/rust-toolchain@<FULL_SHA> # stable
+        with: { components: "rustfmt, clippy" }
+      - uses: Swatinem/rust-cache@<FULL_SHA> # v2
+      - uses: taiki-e/install-action@<FULL_SHA> # v2
+        with: { tool: "cargo-nextest,cargo-deny,cargo-audit,sqlx-cli" }
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo sqlx migrate run && cargo sqlx prepare --workspace --check
+      - run: cargo nextest run --workspace
+      - run: cargo deny check
+      - run: cargo audit
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@<FULL_SHA> # v4
+        with: { fetch-depth: 0 }
+      - uses: gitleaks/gitleaks-action@<FULL_SHA> # v2
