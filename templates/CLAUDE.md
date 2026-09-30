@@ -17,7 +17,7 @@ Lanes read only their TASK.md and what it lists.
 Conventional commits; one commit per completed feature (plus squashed WIP); lane branches `<model>/<slug>`; merges only by the coordinator from the primary checkout; never `git stash`; never push without a founder's word.
 
 ## Commands
-`standards/bin/check` · `scripts/verify/mN.sh` · `standards/bin/new-lane.sh <branch> <base>` · `standards/bin/classify-risk <base> <head>`
+`standards/bin/check` · `scripts/verify/mN.sh` · `standards/bin/new-lane.sh <branch> <base>` · `standards/bin/classify-risk <base> <head>` · `standards/bin/check-scope <worktree> <base>` (coordinator)
 
 ## Gotchas (maintained via /claude-md-management:revise-claude-md; one line each)
 -

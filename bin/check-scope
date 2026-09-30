@@ -1,0 +1,26 @@
+#!/bin/sh
+# Usage: check-scope <worktree> <base> [head]      (head defaults to HEAD; run by the coordinator, not the lane)
+# Compares the lane's ACTUAL diff (added, modified, deleted, renamed-from and renamed-to paths) against the
+# paths it owns per TASK.md "## 3. Files you own". Exit 0 = every changed path is owned; exit 1 = violation
+# (each offending path printed as "scope violation: <path>"); exit 2 = usage/TASK error (missing TASK.md,
+# no owned paths). TASK.md itself is always allowed (the fix round adds "## Revision" to it).
+# Ownership entries are shell patterns matched against repo-relative paths: "docs/*", "api/src/auth/*",
+# "web/src/i18n/keys/*.json". A trailing "/" means the directory and everything below it.
+set -u
+wt=${1:?worktree path}; base=${2:?base ref}; head=${3:-HEAD}
+task="$wt/TASK.md"
+[ -f "$task" ] || { echo "check-scope: no TASK.md in $wt" >&2; exit 2; }
+# Owned patterns: bullets under the "## 3." heading until the next "## " heading. Placeholders like <paths> are ignored.
+owned=$(awk '/^## 3\./{s=1; next} /^## /{s=0} s && /^- /{sub(/^- +/,""); gsub(/`/,""); print}' "$task" \
+        | sed -e 's/[[:space:]]*$//' -e 's|/$|/*|' | grep -v '^<' | grep -v '^$')
+[ -n "$owned" ] || { echo "check-scope: TASK.md §3 lists no owned paths" >&2; exit 2; }
+paths=$(git -C "$wt" diff --name-status --find-renames "$base" "$head" | awk -F'\t' '{for(i=2;i<=NF;i++) print $i}')
+rc=0; n=0
+for p in $paths; do
+  [ "$p" = "TASK.md" ] && continue
+  ok=0
+  for pat in $owned; do case "$p" in $pat) ok=1; break;; esac; done
+  if [ $ok -eq 0 ]; then echo "scope violation: $p"; rc=1; else n=$((n+1)); fi
+done
+[ $rc -eq 0 ] && echo "check-scope: OK ($n changed path(s) within TASK §3)" || echo "check-scope: FAILED (paths outside TASK §3 ownership)"
+exit $rc
