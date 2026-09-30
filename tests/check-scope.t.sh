@@ -31,6 +31,8 @@ git -C "$W" mv web/src/components/Btn.tsx api/src/Btn.tsx; c rename
 want "control: rename from owned into unowned -> exit 1 (renamed-to path)" 1 'scope violation: api/src/Btn.tsx' sh "$C" "$W" "$B"
 git -C "$W" reset -q --hard HEAD~1
 want "explicit head argument works" 0 'check-scope: OK' sh "$C" "$W" "$B" HEAD
+# Regression: run from a directory where the owned patterns match real files (docs/*, web/src/components/*)
+want "in-scope edits pass when run from inside the worktree (patterns are not glob-expanded)" 0 'check-scope: OK \(3 changed' sh -c "cd \"$W\" && sh \"$C\" \"$W\" \"$B\" HEAD~1"
 rm "$W/TASK.md"
 want "usage: missing TASK.md -> exit 2, not 1" 2 'no TASK.md' sh "$C" "$W" "$B"
 printf 'Branch: x\n## 3. Files you own\n- <paths>\n## 4.\n' > "$W/TASK.md"

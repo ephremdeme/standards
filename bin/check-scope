@@ -7,6 +7,7 @@
 # Ownership entries are shell patterns matched against repo-relative paths: "docs/*", "api/src/auth/*",
 # "web/src/i18n/keys/*.json". A trailing "/" means the directory and everything below it.
 set -u
+set -f  # patterns are matched with case, never expanded against the current directory
 wt=${1:?worktree path}; base=${2:?base ref}; head=${3:-HEAD}
 task="$wt/TASK.md"
 [ -f "$task" ] || { echo "check-scope: no TASK.md in $wt" >&2; exit 2; }
