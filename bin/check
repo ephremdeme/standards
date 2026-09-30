@@ -4,6 +4,10 @@
 # Exit 0 only if every applicable step passed. Missing tool = BLOCKED = failure (never silently skipped).
 set -u
 export NO_COLOR=1 FORCE_COLOR=0 CI=1
+# User-local toolchains (rustup, cargo-installed tools, gitleaks, gh) without touching the caller's shell profile.
+PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"; export PATH
+# sqlx-cli connects even with zero queries, so DATABASE_URL must be set; read the repo's git-ignored .env when it isn't.
+if [ -z "${DATABASE_URL:-}" ] && [ -r .env ]; then set -a; . ./.env; set +a; fi
 fail=0
 step() { name=$1; shift; out=$("$@" 2>&1); rc=$?
   if [ $rc -eq 0 ]; then echo "PASS  $name"; else echo "FAIL  $name"; echo "$out" | tail -n 15 | sed 's/^/      /'; fail=1; fi; }
