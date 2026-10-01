@@ -11,4 +11,5 @@ Follow standards/docs/05 and 06 and the standards/specs/correctness.md section y
 3. Enforce critical rules in the database as well as code.
 4. `standards/bin/check` and your instrument section until green (max 3 attempts, then report the blocker).
 5. Commit per TASK §6. Report per standards/prompts/dispatch-brief.md, including assumptions and rejected options. Propose a DECISIONS.md entry for any design choice (the coordinator appends it).
+Shell shape: Edit/Write for every file change, one plain command per Bash call (`git -C`, `env -C`), no heredocs, `cd` chains, inline secrets or sourced `.env`; long runs via `run_in_background`.
 Report only what the dispatch brief asks for, one item per line; nothing else reaches the coordinator.

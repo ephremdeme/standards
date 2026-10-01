@@ -31,7 +31,8 @@ Read the milestone report, the specs it implements, the instrument output, and t
 - Lane dispatch uses `standards/prompts/dispatch-brief.md` verbatim. Worktrees are created by `standards/bin/new-lane.sh`, never by agents (tool-created worktrees can hang the session; the script is the one path that pins branch, TASK header and submodule together).
 - Pre-dispatch: `grep '^Branch:' TASK.md` matches the worktree branch; a deliberately wrong test path exits non-zero there.
 - Never `git stash`; never `pkill -f` (only PIDs you started); absolute paths and `git -C`.
-- One full verify chain at a time per machine (`verify-lib.sh` takes a lock). Long runs detached: `setsid nohup bash -c '… > log 2>&1; echo EXIT=$? >> log' & disown`, then poll the log for `EXIT=` and `pgrep -f '[v]erify'` for liveness.
+- One full verify chain at a time per machine (`verify-lib.sh` takes a lock). Long runs go to the Bash tool's `run_in_background` with output redirected to a log in the scratchpad; the tool reports the exit when it finishes.
+- Command shape, for coordinator and lanes alike (auto mode prompts the founder for anything else): files change through Edit/Write only (no heredocs, `python3 -`, `sed -i`, `perl -pi`); one plain command per Bash call (`git -C`, `env -C <dir> <cmd>`), no `cd … &&` chains or loops; no `DATABASE_URL`, secrets or `PATH=` on a command line and no sourcing `.env` (the tools read it); never edit `.claude/settings*.json`.
 - Agents die (rate limits, kills). Lanes make one WIP commit as soon as tests pass locally (squashed at merge). Dead = listed running + output stale + no processes from the worktree → stop it, then a fresh agent with `standards/prompts/takeover.md`.
 - Never read or tail a subagent's transcript; only its final report enters the coordinator context.
 - Check `/usage` before spawning a burst; one 429 can kill every running agent.
