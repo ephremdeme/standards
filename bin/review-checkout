@@ -6,6 +6,8 @@ set -eu
 src=$1; base=$2; head=$3; id=$4; dst=${TMPDIR:-/tmp}/review-$id
 rm -rf "$dst"; git clone -q --no-local "$src" "$dst"; cd "$dst"
 git checkout -q "$head"; git remote remove origin
+# Reviewers need the pinned standards too: initialise the submodule from the source checkout's copy (no network).
+git -c protocol.file.allow=always -c "submodule.standards.url=$src/standards" submodule update -q --init 2>/dev/null || echo "review-checkout: standards submodule not initialised (reviewer sees no standards/)" >&2
 mkdir -p .review; git diff "$base" "$head" > .review/diff.patch
 git diff --name-status "$base" "$head" > .review/files.txt
 echo "$dst"
