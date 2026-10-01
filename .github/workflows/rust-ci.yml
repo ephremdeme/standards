@@ -34,6 +34,11 @@ jobs:
       - run: cargo audit
   secrets:
     runs-on: ubuntu-latest
+    # The action lists the pull request's commits through the API: it needs pull-requests: read, and the
+    # calling workflow must grant the same (a called workflow can only narrow the caller's permissions).
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with: { fetch-depth: 0 }
@@ -41,3 +46,5 @@ jobs:
         env:
           # Required by the action to scan a pull request's commits (the repo-scoped token, read-only here).
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No PR comments: that would need pull-requests: write; the failing check is the signal.
+          GITLEAKS_ENABLE_COMMENTS: "false"

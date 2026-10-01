@@ -3,6 +3,7 @@ name: ci
 on: [pull_request, merge_group]
 permissions:
   contents: read
+  pull-requests: read   # the secrets job lists the PR's commits (gitleaks-action)
 jobs:
   rust:
     uses: <org>/standards/.github/workflows/rust-ci.yml@<STANDARDS_SHA>
