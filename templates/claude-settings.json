@@ -7,7 +7,7 @@
       "Bash(standards/bin/classify-risk:*)",
       "Bash(cargo fmt:*)", "Bash(cargo clippy:*)", "Bash(cargo nextest:*)", "Bash(cargo test:*)", "Bash(cargo sqlx:*)",
       "Bash(npx --no-install vitest:*)", "Bash(npx --no-install tsc:*)", "Bash(npx --no-install biome:*)",
-      "Bash(npm --prefix web exec:*)", "Bash(npm --prefix web run:*)", "Bash(npm --prefix web ci:*)",
+      "Bash(npm --prefix web run:*)", "Bash(npm --prefix web ci:*)",
       "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git add:*)", "Bash(git commit:*)"
     ],
     "deny": [
