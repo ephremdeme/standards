@@ -2,7 +2,9 @@
 # matches one of these shell patterns. Anything else — including brand-new files anywhere — is HIGH.
 docs/*
 *.md
-web/src/components/*
+# Admin screens (web/src/components/admin/*) resolve, void, reissue and edit questions: HIGH, never listed here
+# (m1.1 item O2). Player-facing components get their own LOW subtree when they exist.
+web/src/components/player/*
 web/src/styles/*
 web/src/i18n/keys/*
 web/public/*

@@ -4,23 +4,30 @@
 # "red when the code is wrong" control escapes the + in its perl mutation (the original s/a + b/… never matched).
 # Prints PASS / FAIL / BLOCKED per claim. GitHub-side controls need a real org and are reported BLOCKED here.
 set -u
+# User-local toolchains (rustup, cargo-installed tools, gitleaks) so the Rust steps run from any shell (m1.1 O7).
+PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"; export PATH
+# The sqlx step of `check` needs a reachable Postgres: take DATABASE_URL from the environment (the instruments and CI
+# export it) or from the product repo's git-ignored .env in the current directory, exactly as bin/check does.
+if [ -z "${DATABASE_URL:-}" ] && [ -r "$PWD/.env" ]; then set -a; . "$PWD/.env"; set +a; fi
 H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); R=0
 ok(){ echo "PASS    $1"; }; bad(){ echo "FAIL    $1"; R=1; }; blk(){ echo "BLOCKED $1"; }
 # expected failures must fail FOR THE RIGHT REASON: exit 1 from our script, not 126/127 (not executable / not found) or 2 (usage)
-expect_fail(){ sh -c "$2" >/tmp/o 2>&1; rc=$?; if [ $rc -eq 1 ]; then ok "$1"; elif [ $rc -eq 0 ]; then bad "$1 (expected failure, got success)"; else bad "$1 (harness error rc=$rc)"; tail -n 5 /tmp/o; fi; }
-expect_ok(){ if sh -c "$2" >/tmp/o 2>&1; then ok "$1"; else bad "$1"; tail -n 20 /tmp/o; fi; }
+expect_fail(){ sh -c "$2" >$T/o 2>&1; rc=$?; if [ $rc -eq 1 ]; then ok "$1"; elif [ $rc -eq 0 ]; then bad "$1 (expected failure, got success)"; else bad "$1 (harness error rc=$rc)"; tail -n 5 $T/o; fi; }
+expect_ok(){ if sh -c "$2" >$T/o 2>&1; then ok "$1"; else bad "$1"; tail -n 20 $T/o; fi; }
 git config --global user.email s@t; git config --global user.name smoke; git config --global protocol.file.allow always
 git config --global init.defaultBranch main
 
 # --- 1. standards pinned in-repo --------------------------------------------------------------
-cp -r "$H" "$T/standards-src"; chmod +x "$T/standards-src"/bin/*; cd "$T/standards-src" && git init -q && echo "RULE=v1" > PIN && git add -A && git add --chmod=+x bin/* && git commit -qm v1
+# A pinned submodule copy carries a `.git` FILE pointing into the product repo's object store; drop it before `git init`,
+# or the smoke's commits would land in the real submodule (m1.1 O7).
+cp -r "$H" "$T/standards-src"; rm -rf "$T/standards-src/.git"; chmod +x "$T/standards-src"/bin/*; cd "$T/standards-src" && git init -q && echo "RULE=v1" > PIN && git add -A && git add --chmod=+x bin/* && git commit -qm v1
 [ "$(git ls-files -s bin/check | cut -c1-6)" = "100755" ] && ok "scripts committed with executable bit" || bad "scripts not executable in git"
 V1=$(git rev-parse HEAD)
 mkdir "$T/game" && cd "$T/game" && git init -q && cp "$H/templates/gitignore" .gitignore && git submodule -q add "$T/standards-src" standards && git commit -qm init
 cd "$T/standards-src" && echo "RULE=v2" > PIN && git commit -qam v2
 cd "$T/game" && git submodule update -q
 [ "$(git -C standards rev-parse HEAD)" = "$V1" ] && grep -q v1 standards/PIN && ok "standards pinned: upstream change does not reach product repo until SHA bump" || bad "standards pinning"
-if grep -rn '\.\./standards' "$H" --include='*.md' --include='*.json' --include='*.yml' | grep -v smoke >/tmp/o; then bad "agent-facing files still reference ../standards"; cat /tmp/o; else ok "no agent-facing file references ../standards"; fi
+if grep -rn '\.\./standards' "$H" --include='*.md' --include='*.json' --include='*.yml' | grep -v smoke >$T/o; then bad "agent-facing files still reference ../standards"; cat $T/o; else ok "no agent-facing file references ../standards"; fi
 
 # --- 2. frontend check + acceptance ---------------------------------------------------------------
 mkdir -p web/tests/accept web/src && cd web
@@ -42,7 +49,23 @@ expect_fail "check fails when an uncommitted secret is added" "$T/game/standards
 git add leak.txt && git commit -qm leak
 expect_fail "check fails when a secret is committed" "$T/game/standards/bin/check"
 git reset -q --hard HEAD~1
-command -v cargo >/dev/null && echo "INFO rust available" || blk "Rust steps of check and the instrument (no cargo in this sandbox) — run smoke on a dev machine"
+# --- 2c. Rust steps of check (m1.1 O7): a minimal crate so fmt, clippy, nextest, sqlx, deny and audit really run
+mkdir -p src
+printf '[package]\nname = "smoke"\nversion = "0.0.0"\nedition = "2021"\npublish = false\n\n[dependencies]\n' > Cargo.toml
+printf 'pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn adds() {\n        assert_eq!(super::add(2, 2), 4);\n    }\n}\n' > src/lib.rs
+cp "$H/templates/deny.toml" deny.toml
+git add -A >/dev/null 2>&1; git commit -qm rust
+# sqlx-cli connects even with zero queries: the sqlx step needs the caller's DATABASE_URL (the instruments export
+# the dev Postgres; CI exports its service). Without one the Rust steps cannot all run and that is reported, never hidden.
+if ! command -v cargo >/dev/null; then blk "Rust steps of check and the instrument (no cargo on PATH) — install rustup user-locally"
+elif [ -z "${DATABASE_URL:-}" ]; then blk "Rust steps of check (export DATABASE_URL to a reachable Postgres, as scripts/verify/*.sh do)"
+else
+  echo "INFO rust available"
+  if "$T/game/standards/bin/check" > "$T/o" 2>&1 && grep -q "PASS  rust tests" "$T/o" && grep -q "PASS  sqlx check" "$T/o"; then ok "check runs the Rust steps on a real crate (rust steps ran: fmt, clippy, tests, sqlx, deny, audit)"; else bad "rust steps of check"; tail -n 20 "$T/o"; fi
+  perl -pi -e 's/a \+ b/a - b/' src/lib.rs; git commit -qam break-rust
+  expect_fail "check fails when a Rust unit test fails" "$T/game/standards/bin/check"
+  git reset -q --hard HEAD~1
+fi
 
 # --- 2b. instrument (verify-lib) and lane creation ------------------------------------------------
 mkdir -p scripts/verify
@@ -79,12 +102,13 @@ C="$T/game/standards/bin/classify-risk"
 case_(){ git checkout -q -b "c$1" main 2>/dev/null; sh -c "$2"; git add -A; git commit -qm "c$1"; got=$($C main HEAD 2>/dev/null); [ -z "$got" ] && got="(script error)"; git submodule update -q 2>/dev/null; [ "$got" = "$3" ] && ok "risk: $4 -> $3" || bad "risk: $4 (got $got, want $3)"; git checkout -q main; git submodule update -q; }
 git checkout -q main
 case_ 1 'mkdir -p docs && echo x > docs/a.md' LOW "docs only"
-case_ 2 'mkdir -p web/src/components && echo x > web/src/components/Btn.tsx' LOW "UI component"
+case_ 2 'mkdir -p web/src/components/player && echo x > web/src/components/player/Btn.tsx' LOW "player UI component"
+case_ 2b 'mkdir -p web/src/components/admin && echo x > web/src/components/admin/QuestionCard.tsx' HIGH "admin screen (resolves/voids questions; m1.1 O2)"
 case_ 3 'mkdir -p api/src/payouts && echo x > api/src/payouts/mod.rs' HIGH "brand-new module outside known patterns"
 case_ 4 'echo x > justfile' HIGH "justfile"
 case_ 5 'echo "// x" >> web/package.json' HIGH "frontend manifest"
 case_ 6 'git -C standards fetch -q origin && git -C standards checkout -q origin/main' HIGH "standards submodule pointer bump"
-case_ 7 'mkdir -p web/src/components && echo x > web/src/components/A.tsx && git add -A && git commit -qm pre && mkdir -p api && git mv web/src/components/A.tsx api/A.tsx' HIGH "rename from UI into api"
+case_ 7 'mkdir -p web/src/components/player && echo x > web/src/components/player/A.tsx && git add -A && git commit -qm pre && mkdir -p api && git mv web/src/components/player/A.tsx api/A.tsx' HIGH "rename from UI into api"
 
 # --- 4. risk gate: founder approvals must be on the current head ---------------------------------
 G="$T/game/standards/bin/risk-gate"
@@ -117,11 +141,11 @@ for f in reviewer.md reviewer-lite.md; do
 # --- 5b. DeepSeek dispatch refusals (no network call needed) -------------------------------------
 DD="$T/game/standards/bin/dispatch-deepseek"
 out=$(standards/bin/new-lane.sh ds/ui-button main); W="$T/game/.worktrees/ds-ui-button"
-( unset DS_API_KEY; sh -c "$DD $W" ) >/tmp/o 2>&1; [ $? -eq 2 ] && grep -q "DS_API_KEY not set" /tmp/o && ok "dispatch-deepseek: refuses without a key" || bad "dispatch-deepseek key check"
-DS_API_KEY=dummy sh -c "$DD $W" >/tmp/o 2>&1; [ $? -eq 2 ] && grep -q "not Risk: LOW" /tmp/o && ok "dispatch-deepseek: refuses a lane not marked Risk: LOW" || bad "dispatch-deepseek risk check"
+( unset DS_API_KEY; sh -c "$DD $W" ) >$T/o 2>&1; [ $? -eq 2 ] && grep -q "DS_API_KEY not set" $T/o && ok "dispatch-deepseek: refuses without a key" || bad "dispatch-deepseek key check"
+DS_API_KEY=dummy sh -c "$DD $W" >$T/o 2>&1; [ $? -eq 2 ] && grep -q "not Risk: LOW" $T/o && ok "dispatch-deepseek: refuses a lane not marked Risk: LOW" || bad "dispatch-deepseek risk check"
 touch .no-deepseek; git add .no-deepseek; git commit -qm nods; git -C "$W" merge -q main 2>/dev/null
 perl -pi -e 's/^Risk: .*/Risk: LOW/' "$W/TASK.md"
-DS_API_KEY=dummy sh -c "$DD $W" >/tmp/o 2>&1; [ $? -eq 2 ] && grep -q "never sends code to DeepSeek" /tmp/o && ok "dispatch-deepseek: refuses repos marked .no-deepseek (exchange)" || bad "dispatch-deepseek .no-deepseek"
+DS_API_KEY=dummy sh -c "$DD $W" >$T/o 2>&1; [ $? -eq 2 ] && grep -q "never sends code to DeepSeek" $T/o && ok "dispatch-deepseek: refuses repos marked .no-deepseek (exchange)" || bad "dispatch-deepseek .no-deepseek"
 git worktree remove --force "$W"; git rm -q .no-deepseek; git commit -qm rmnods
 grep -rq 'deepseek' "$H/agents" && bad "agent files reference deepseek" || ok "Claude reviewer agents contain no DeepSeek routing"
 blk "live DeepSeek run (needs DS_API_KEY + claude CLI) — first LOW lane in G0"
