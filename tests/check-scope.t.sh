@@ -18,6 +18,15 @@ echo a2 > "$W/docs/a.md"; echo c2 > "$W/web/src/components/Btn.tsx"; echo b2 > "
 want "in-scope edits pass" 0 'check-scope: OK \(3 changed' sh "$C" "$W" "$B"
 echo "## Revision" >> "$W/TASK.md"; c task-edit
 want "editing TASK.md itself is always allowed" 0 'check-scope: OK' sh "$C" "$W" "$B"
+# Regression: a bullet may pack several comma-separated paths and a parenthetical note.
+cp "$W/TASK.md" "$W/TASK.md.orig"
+printf 'Branch: opus/x\nBase: 0\nRisk: LOW\n\n## 3. Files you own (touch nothing else)\n- docs/, `web/src/components/*` (add the button only), api/src/owned.rs\n\n## 4. Hard rules\n- none\n' > "$W/TASK.md"
+want "packed bullet: comma-separated paths with a parenthetical still parse" 0 'check-scope: OK \(3 changed' sh "$C" "$W" "$B"
+mv "$W/TASK.md.orig" "$W/TASK.md"
+# Regression: the base branch moved on after the lane branched; those commits are not the lane's changes.
+git -C "$W" branch -q lane HEAD; git -C "$W" checkout -q -b basebranch "$B"; echo n > "$W/api/src/other.rs"; c base-moved
+want "base branch advanced after branching: its files are not scope violations" 0 'check-scope: OK \(3 changed' sh "$C" "$W" basebranch lane
+git -C "$W" checkout -q main; git -C "$W" branch -q -D basebranch lane
 echo d2 > "$W/api/src/other.rs"; c out-of-scope
 want "control: modified file outside §3 -> exit 1 naming it" 1 'scope violation: api/src/other.rs' sh "$C" "$W" "$B"
 git -C "$W" reset -q --hard HEAD~1

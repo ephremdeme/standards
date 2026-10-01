@@ -11,11 +11,15 @@ set -f  # patterns are matched with case, never expanded against the current dir
 wt=${1:?worktree path}; base=${2:?base ref}; head=${3:-HEAD}
 task="$wt/TASK.md"
 [ -f "$task" ] || { echo "check-scope: no TASK.md in $wt" >&2; exit 2; }
-# Owned patterns: bullets under the "## 3." heading until the next "## " heading. Placeholders like <paths> are ignored.
+# Owned patterns: bullets under the "## 3." heading until the next "## " heading. A bullet may list several
+# paths separated by commas and may carry a parenthetical note, which is dropped. Placeholders like <paths> are ignored.
 owned=$(awk '/^## 3\./{s=1; next} /^## /{s=0} s && /^- /{sub(/^- +/,""); gsub(/`/,""); print}' "$task" \
-        | sed -e 's/[[:space:]]*$//' -e 's|/$|/*|' | grep -v '^<' | grep -v '^$')
+        | sed -e 's/ *([^)]*)//g' -e 's/,/\n/g' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's|/$|/*|' \
+        | grep -v '^<' | grep -v '^$')
 [ -n "$owned" ] || { echo "check-scope: TASK.md §3 lists no owned paths" >&2; exit 2; }
-paths=$(git -C "$wt" diff --name-status --find-renames "$base" "$head" | awk -F'\t' '{for(i=2;i<=NF;i++) print $i}')
+# Diff from the merge base, so commits that landed on the base branch after the lane branched are not the lane's.
+mb=$(git -C "$wt" merge-base "$base" "$head") || { echo "check-scope: no merge base between $base and $head" >&2; exit 2; }
+paths=$(git -C "$wt" diff --name-status --find-renames "$mb" "$head" | awk -F'\t' '{for(i=2;i<=NF;i++) print $i}')
 rc=0; n=0
 for p in $paths; do
   [ "$p" = "TASK.md" ] && continue
