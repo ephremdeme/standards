@@ -94,6 +94,8 @@ echo '[{"user":{"login":"bot"},"state":"APPROVED","commit_id":"new"}]' > $T/r3.j
 echo '[{"user":{"login":"fa"},"state":"APPROVED","commit_id":"new"},{"user":{"login":"fb"},"state":"APPROVED","commit_id":"new"}]' > $T/r4.json
 echo '[{"user":{"login":"fa"},"state":"APPROVED","commit_id":"new"},{"user":{"login":"fa"},"state":"CHANGES_REQUESTED","commit_id":"new"}]' > $T/r5.json
 expect_ok   "gate: HIGH + 1 founder approval on head (game, need 1)" "$G HIGH new $T/r1.json 1 fa,fb"
+expect_ok   "gate: reviews file given as a bare relative name, as the workflow does" "cd $T && $G HIGH new r1.json 1 fa,fb"
+expect_fail "gate: unreadable reviews file fails closed" "$G HIGH new $T/missing.json 1 fa,fb"
 expect_fail "gate: approval on an older commit is stale" "$G HIGH new $T/r2.json 1 fa,fb"
 expect_fail "gate: non-founder (bot) approval does not count" "$G HIGH new $T/r3.json 1 fa,fb"
 expect_fail "gate: exchange needs 2, one approval blocks" "$G HIGH new $T/r1.json 2 fa,fb"

@@ -5,10 +5,12 @@
 set -u
 level=$1; head=$2; reviews=$3; need=$4; founders=$5
 [ "$level" = LOW ] && { echo "risk-gate: LOW, no founder approval needed"; exit 0; }
+# The file is read, not require()d: a bare name such as `reviews.json` is a module name to node (first CI run, game PR #1).
 n=$(node -e '
-const [f,head,founders]=process.argv.slice(1); const r=require(f); const F=founders.split(",");
+const [f,head,founders]=process.argv.slice(1); const r=JSON.parse(require("fs").readFileSync(f,"utf8")); const F=founders.split(",");
 const latest={}; for (const x of r) { if(!F.includes(x.user.login)) continue; if (x.state==="COMMENTED") continue; latest[x.user.login]=x; }
 console.log(Object.values(latest).filter(x=>x.state==="APPROVED" && x.commit_id===head).length);
-' "$reviews" "$head" "$founders")
+' "$reviews" "$head" "$founders") || n=""
+case "$n" in ''|*[!0-9]*) echo "risk-gate: could not count approvals (reviews file unreadable or malformed)"; exit 1;; esac
 if [ "$n" -ge "$need" ]; then echo "risk-gate: HIGH, $n/$need founder approvals on $head"; exit 0; fi
 echo "risk-gate: HIGH, only $n/$need founder approvals on current head $head"; exit 1
