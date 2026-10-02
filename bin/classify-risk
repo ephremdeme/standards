@@ -7,6 +7,9 @@ paths=$(git diff --name-status --find-renames "$base" "$head" | awk -F'\t' '{for
 [ -z "$paths" ] && { echo LOW; exit 0; }
 for p in $paths; do
   ok=0
+  # Admin surfaces are HIGH wherever they sit (m1.1 O2): any path segment `admin`, or a file named admin.<ext>,
+  # before the allowlist is consulted — a screen that resolves or voids questions cannot become LOW by placement.
+  case "/$p" in */admin/*|*/admin.*) level=HIGH; echo "high: $p (admin surface)" >&2; continue;; esac
   while IFS= read -r pat; do
     case "$pat" in ''|'#'*) continue;; esac
     case "$p" in $pat) ok=1; break;; esac

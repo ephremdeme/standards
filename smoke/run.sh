@@ -10,6 +10,9 @@ PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"; export PATH
 # export it) or from the product repo's git-ignored .env in the current directory, exactly as bin/check does.
 if [ -z "${DATABASE_URL:-}" ] && [ -r "$PWD/.env" ]; then set -a; . "$PWD/.env"; set +a; fi
 H=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); R=0
+# Every temp file and the verify lock of the throwaway instrument live under $T: the smoke may itself run inside
+# an instrument section that holds ${TMPDIR:-/tmp}/verify.lock.d (m1.1 O7).
+TMPDIR=$T; export TMPDIR
 ok(){ echo "PASS    $1"; }; bad(){ echo "FAIL    $1"; R=1; }; blk(){ echo "BLOCKED $1"; }
 # expected failures must fail FOR THE RIGHT REASON: exit 1 from our script, not 126/127 (not executable / not found) or 2 (usage)
 expect_fail(){ sh -c "$2" >$T/o 2>&1; rc=$?; if [ $rc -eq 1 ]; then ok "$1"; elif [ $rc -eq 0 ]; then bad "$1 (expected failure, got success)"; else bad "$1 (harness error rc=$rc)"; tail -n 5 $T/o; fi; }
@@ -63,7 +66,10 @@ else
   echo "INFO rust available"
   if "$T/game/standards/bin/check" > "$T/o" 2>&1 && grep -q "PASS  rust tests" "$T/o" && grep -q "PASS  sqlx check" "$T/o"; then ok "check runs the Rust steps on a real crate (rust steps ran: fmt, clippy, tests, sqlx, deny, audit)"; else bad "rust steps of check"; tail -n 20 "$T/o"; fi
   perl -pi -e 's/a \+ b/a - b/' src/lib.rs; git commit -qam break-rust
-  expect_fail "check fails when a Rust unit test fails" "$T/game/standards/bin/check"
+  # Red for its own reason: the Rust tests step must be the failing one, not an advisory fetch or anything else.
+  if "$T/game/standards/bin/check" > "$T/o" 2>&1; then bad "check passed with a failing Rust unit test"
+  elif grep -q "FAIL  rust tests" "$T/o"; then ok "check fails when a Rust unit test fails (rust tests step red)"
+  else bad "check failed with a Rust unit test broken, but not on the rust tests step"; tail -n 20 "$T/o"; fi
   git reset -q --hard HEAD~1
 fi
 
@@ -86,8 +92,8 @@ expect_fail "instrument: a filter matching nothing does NOT count as green (asse
 perl -pi -e 's/a \+ b/a + b + 1/' web/src/math.ts
 expect_fail "instrument: red when the code is wrong" "scripts/verify/m0.sh --section web"
 git checkout -q -- web/src/math.ts
-mkdir "${TMPDIR:-/tmp}/verify.lock.d"; scripts/verify/m0.sh --section web > /tmp/lockout 2>&1; echo "rc=$?" >> /tmp/lockout; rmdir "${TMPDIR:-/tmp}/verify.lock.d"
-grep -q "rc=3" /tmp/lockout && grep -q "another verify chain" /tmp/lockout && ok "instrument: second concurrent verify chain is refused" || bad "instrument lock"
+mkdir "$T/verify.lock.d"; scripts/verify/m0.sh --section web > "$T/lockout" 2>&1; echo "rc=$?" >> "$T/lockout"; rmdir "$T/verify.lock.d"
+grep -q "rc=3" "$T/lockout" && grep -q "another verify chain" "$T/lockout" && ok "instrument: second concurrent verify chain is refused" || bad "instrument lock"
 git add -A >/dev/null; git commit -qm instrument
 out=$(standards/bin/new-lane.sh opus/lock-timing main)
 W="$T/game/.worktrees/opus-lock-timing"
@@ -104,6 +110,8 @@ git checkout -q main
 case_ 1 'mkdir -p docs && echo x > docs/a.md' LOW "docs only"
 case_ 2 'mkdir -p web/src/components/player && echo x > web/src/components/player/Btn.tsx' LOW "player UI component"
 case_ 2b 'mkdir -p web/src/components/admin && echo x > web/src/components/admin/QuestionCard.tsx' HIGH "admin screen (resolves/voids questions; m1.1 O2)"
+case_ 2c 'mkdir -p web/src/components/player/admin && echo x > web/src/components/player/admin/ResolveForm.tsx' HIGH "admin surface nested under a LOW subtree"
+case_ 2d 'mkdir -p web/src/i18n/keys && echo x > web/src/i18n/keys/admin.json' HIGH "admin copy (button labels of the admin screens)"
 case_ 3 'mkdir -p api/src/payouts && echo x > api/src/payouts/mod.rs' HIGH "brand-new module outside known patterns"
 case_ 4 'echo x > justfile' HIGH "justfile"
 case_ 5 'echo "// x" >> web/package.json' HIGH "frontend manifest"
@@ -143,8 +151,14 @@ DD="$T/game/standards/bin/dispatch-deepseek"
 out=$(standards/bin/new-lane.sh ds/ui-button main); W="$T/game/.worktrees/ds-ui-button"
 ( unset DS_API_KEY; sh -c "$DD $W" ) >$T/o 2>&1; [ $? -eq 2 ] && grep -q "DS_API_KEY not set" $T/o && ok "dispatch-deepseek: refuses without a key" || bad "dispatch-deepseek key check"
 DS_API_KEY=dummy sh -c "$DD $W" >$T/o 2>&1; [ $? -eq 2 ] && grep -q "not Risk: LOW" $T/o && ok "dispatch-deepseek: refuses a lane not marked Risk: LOW" || bad "dispatch-deepseek risk check"
-touch .no-deepseek; git add .no-deepseek; git commit -qm nods; git -C "$W" merge -q main 2>/dev/null
 perl -pi -e 's/^Risk: .*/Risk: LOW/' "$W/TASK.md"
+# Workspace trust (m1.1 O3): keyed by the REPOSITORY ROOT in ~/.claude.json; a fake HOME holds the state file.
+mkdir -p "$T/h"; GR=$(cd "$T/game" && pwd -P)
+printf '{"projects":{}}\n' > "$T/h/.claude.json"
+HOME=$T/h DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $W" >$T/o 2>&1; [ $? -eq 2 ] && grep -q "not a trusted" $T/o && ok "dispatch-deepseek: refuses when the repository root is not a trusted workspace" || bad "dispatch-deepseek trust refusal"
+printf '{"projects":{"%s":{"hasTrustDialogAccepted":true}}}\n' "$GR" > "$T/h/.claude.json"
+HOME=$T/h DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $W" >$T/o 2>&1; [ $? -eq 0 ] && grep -q "checks passed" $T/o && ok "dispatch-deepseek: a lane worktree inherits the trusted repository root (dry run)" || bad "dispatch-deepseek trust inheritance"
+touch .no-deepseek; git add .no-deepseek; git commit -qm nods; git -C "$W" merge -q main 2>/dev/null
 DS_API_KEY=dummy sh -c "$DD $W" >$T/o 2>&1; [ $? -eq 2 ] && grep -q "never sends code to DeepSeek" $T/o && ok "dispatch-deepseek: refuses repos marked .no-deepseek (exchange)" || bad "dispatch-deepseek .no-deepseek"
 git worktree remove --force "$W"; git rm -q .no-deepseek; git commit -qm rmnods
 grep -rq 'deepseek' "$H/agents" && bad "agent files reference deepseek" || ok "Claude reviewer agents contain no DeepSeek routing"

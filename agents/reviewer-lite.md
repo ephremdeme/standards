@@ -1,6 +1,6 @@
 ---
 name: reviewer-lite
-description: Fast review of LOW-risk diffs (typically written by DeepSeek) (UI, admin pages, CRUD, docs, glue) against TASK.md and standards/docs/06. Use for every LOW-risk lane.
+description: Fast review of LOW-risk diffs (typically written by DeepSeek) (player UI, CRUD, docs, glue; never admin screens) against TASK.md and standards/docs/06. Use for every LOW-risk lane.
 tools: Read, Glob, Grep
 model: claude-sonnet-5
 ---

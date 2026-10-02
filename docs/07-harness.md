@@ -47,7 +47,7 @@ Workers run in a container or separate OS user: their worktree only, no Docker s
 ## 6. DeepSeek usage
 - Official integration: Claude Code pointed at `https://api.deepseek.com/anthropic` with a DeepSeek API key. Metered pay-per-token API, so scripted dispatch is ordinary API use (no coding-plan tool restrictions).
 - Model names: `deepseek-flash` (legacy `deepseek-v4-flash` is retired and served by V4.1 Flash); `deepseek-v4-pro` exists but is not used by default. Unknown Claude model names sent to this endpoint are mapped by DeepSeek (opus → v4-pro, sonnet/haiku → flash), so **inside a DeepSeek session every "Claude" subagent is actually DeepSeek.** Reviews and Claude subagents run only from normal `claude` sessions.
-- **Code leaves the machine to DeepSeek.** Allowed for game LOW lanes (UI, admin screens, docs). Never for the exchange (money core and sellable IP): its repo carries `.no-deepseek` and the script refuses. Never production data (domain rule 7).
+- **Code leaves the machine to DeepSeek.** Allowed for game LOW lanes (player UI, docs); admin screens are HIGH (they resolve, void and reissue questions) and never go to DeepSeek (m1.1 O2). Never for the exchange (money core and sellable IP): its repo carries `.no-deepseek` and the script refuses. Never production data (domain rule 7).
 - Env vars follow DeepSeek's official Claude Code guide, including `CLAUDE_CODE_AUTO_COMPACT_WINDOW=786432`. Deviation: effort defaults to `high` (guide: `max`); use `max` for hard LOW lanes.
 - Lanes run with WebSearch/WebFetch disabled (DeepSeek's web search costs extra tokens and widens prompt-injection surface).
 - The `claude-opus*` → `deepseek-v4-pro` mapping is billed at Pro price; lanes force subagents to `deepseek-flash`.

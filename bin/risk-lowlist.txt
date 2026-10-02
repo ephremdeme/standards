@@ -2,8 +2,9 @@
 # matches one of these shell patterns. Anything else — including brand-new files anywhere — is HIGH.
 docs/*
 *.md
-# Admin screens (web/src/components/admin/*) resolve, void, reissue and edit questions: HIGH, never listed here
-# (m1.1 item O2). Player-facing components get their own LOW subtree when they exist.
+# Admin surfaces are HIGH wherever they sit: classify-risk refuses any path with an `admin` segment or an admin.<ext>
+# file before this list is read (m1.1 item O2), so web/src/components/admin/* and web/src/i18n/keys/admin.json never
+# match. Player-facing components get their own LOW subtree.
 web/src/components/player/*
 web/src/styles/*
 web/src/i18n/keys/*

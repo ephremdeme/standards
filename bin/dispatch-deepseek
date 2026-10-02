@@ -12,12 +12,16 @@ top=$(git -C "$wt" rev-parse --show-toplevel)
 grep -qx 'Risk: LOW' "$wt/TASK.md" || { echo "dispatch-deepseek: refused — TASK is not Risk: LOW" >&2; exit 2; }
 [ "$(git -C "$wt" branch --show-current)" = "$(sed -n 's/^Branch: //p' "$wt/TASK.md")" ] || { echo "dispatch-deepseek: branch mismatch" >&2; exit 2; }
 # Headless `claude -p` never shows the trust dialog and ignores a project's permission allow rules until the
-# REPOSITORY ROOT (the primary checkout; worktrees inherit it) was trusted once interactively. Fail fast with the
-# remedy instead of running a lane whose every tool call is auto-denied (m1.1 O3). Read-only look at Claude's state.
-if command -v jq >/dev/null 2>&1 && [ -r "$HOME/.claude.json" ]; then
-  jq -e --arg p "$top" '.projects[$p].hasTrustDialogAccepted == true' "$HOME/.claude.json" >/dev/null 2>&1 \
-    || { echo "dispatch-deepseek: refused — $top is not a trusted Claude Code workspace; run \`claude\` once inside it and accept the dialog" >&2; exit 2; }
-fi
+# REPOSITORY ROOT (the primary checkout — a lane worktree inherits it) was trusted once interactively. Fail fast with
+# the remedy instead of running a lane whose every tool call is auto-denied and whose untouched worktree would then
+# pass `check` (m1.1 O3). Read-only look at Claude's state; closed when the look is impossible.
+root=$(cd "$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)/.." && pwd -P)
+command -v jq >/dev/null 2>&1 || { echo "dispatch-deepseek: refused — jq is required for the workspace trust check" >&2; exit 2; }
+[ -r "$HOME/.claude.json" ] || { echo "dispatch-deepseek: refused — $HOME/.claude.json is unreadable, so $root is not a trusted Claude Code workspace here; run \`claude\` once inside it and accept the dialog" >&2; exit 2; }
+jq -e --arg p "$root" '.projects[$p].hasTrustDialogAccepted == true' "$HOME/.claude.json" >/dev/null 2>&1 \
+  || { echo "dispatch-deepseek: refused — $root is not a trusted Claude Code workspace; run \`claude\` once inside it and accept the dialog" >&2; exit 2; }
+# Smoke hook: every refusal above has run; stop before anything leaves the machine.
+[ "${DISPATCH_DRY_RUN:-0}" = 1 ] && { echo "dispatch-deepseek: checks passed (dry run, nothing dispatched)"; exit 0; }
 brief=$(sed "s|<ABS_WORKTREE>|$wt|g" "$wt/standards/prompts/dispatch-brief.md")
 cd "$wt"
 env -u ANTHROPIC_API_KEY \
