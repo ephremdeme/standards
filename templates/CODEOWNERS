@@ -1,6 +1,6 @@
-# Paths are REPO-RELATIVE. Finalize after G0/E0 layout; verify with the G0 merge-control test PRs. Secondary signal only: risk-gate enforces founder approval.
-# CODEOWNERS guarantees approval from at least ONE listed owner — "both founders" is enforced
-# by the exchange repo ruleset (2 required approvals), not by this file.
+# Paths are REPO-RELATIVE. Finalize after G0/E0 layout. Secondary signal only: risk-gate is informational (lists HIGH
+# paths; the founder merges after reading them, D-049 amended 2026-10-02).
+# No approval is required by this file or by a ruleset while the founder is the only merger.
 
 # ---- game repo (example layout) ----
 /migrations/            @founder-a @founder-b
@@ -20,4 +20,4 @@
 /CODEOWNERS             @founder-a @founder-b
 
 # ---- exchange repo ----
-# *  @founder-a @founder-b     (plus ruleset: 2 required approvals)
+# *  @founder-a @founder-b     (risk-gate is informational: lists HIGH paths; the founder merges after reading them, D-049 amended 2026-10-02)

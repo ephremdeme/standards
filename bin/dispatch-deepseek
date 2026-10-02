@@ -1,9 +1,11 @@
 #!/bin/sh
 # Usage: standards/bin/dispatch-deepseek <ABS_WORKTREE> [effort: high|max]
-# Runs a LOW-risk lane headless: Claude Code harness, DeepSeek model. Env vars follow DeepSeek's official guide
+# Runs a lane headless (LOW by default; HIGH only under DISPATCH_ALLOW_HIGH=1, D-073): Claude Code harness, DeepSeek model. Env vars follow DeepSeek's official guide
 # (api-docs.deepseek.com/quick_start/agent_integrations/claude_code); effort defaults to high (guide uses max).
 # Web tools disabled: lanes need none, and DeepSeek web search adds token cost and injection surface.
-# DeepSeek settings exist ONLY in this process. Never used for HIGH lanes or for repos marked .no-deepseek.
+# DeepSeek settings exist ONLY in this process. HIGH lanes are refused unless DISPATCH_ALLOW_HIGH is exactly 1
+# (founder decision D-073, 2026-10-02: an Opus-written TASK/contract, Opus review mandatory). Absolute refusals, with
+# or without that variable: repos marked .no-deepseek, and a TASK whose §3 owns an admin surface (m1.1 O2).
 # Refusals before dispatch exit 2. After the run the lane is judged on bytes and by judges it could not touch: it must
 # have added commits on its branch, left a clean tree (git errors and hidden index edits fail closed), changed nothing
 # under scripts/verify/, standards or .gitmodules, and then pass `check` and the instrument section named in TASK §5,
@@ -19,13 +21,28 @@ root=$(cd "$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)/.."
 # deleting or replacing the marker inside a lane changes nothing (retro review 12).
 if [ -e "$top/.no-deepseek" ] || git -C "$root" cat-file -e HEAD:.no-deepseek 2>/dev/null || git -C "$wt" cat-file -e HEAD:.no-deepseek 2>/dev/null; then
   echo "dispatch-deepseek: refused — this repo never sends code to DeepSeek" >&2; exit 2; fi
-# Risk comes from the TASK header only: lines 1-3 hold exactly one `Risk: ` line, it reads `Risk: LOW`, and no other
-# line of the TASK starts with `Risk: ` (a `Risk: LOW` further down a HIGH TASK never counts; retro review 12).
+# Risk comes from the TASK header only: lines 1-3 hold exactly one `Risk: ` line, it reads `Risk: LOW` (or exactly
+# `Risk: HIGH` with DISPATCH_ALLOW_HIGH=1, D-073), and no other line of the TASK starts with `Risk: ` (a `Risk: LOW`
+# further down a HIGH TASK never counts; retro review 12).
 task=$wt/TASK.md
 [ -f "$task" ] || { echo "dispatch-deepseek: refused — no TASK.md in $wt" >&2; exit 2; }
 in_header=$(head -n 3 "$task" | grep -c '^Risk: ' || true); in_task=$(grep -c '^Risk: ' "$task" || true)
-if [ "$in_header" != 1 ] || [ "$in_task" != 1 ] || ! head -n 3 "$task" | grep -qx 'Risk: LOW'; then
-  echo "dispatch-deepseek: refused — TASK is not Risk: LOW (the header, lines 1-3, must hold the only Risk: line)" >&2; exit 2; fi
+risk=$(head -n 3 "$task" | sed -n 's/^Risk: //p'); high=0
+if [ "$in_header" != 1 ] || [ "$in_task" != 1 ]; then risk=""; fi
+case "$risk" in
+  LOW) ;;
+  HIGH) if [ "${DISPATCH_ALLOW_HIGH:-}" = 1 ]; then high=1; else risk=""; fi;;
+  *) risk="";;
+esac
+[ -n "$risk" ] || { echo "dispatch-deepseek: refused — TASK is not Risk: LOW (the header, lines 1-3, must hold the only Risk: line; Risk: HIGH needs DISPATCH_ALLOW_HIGH=1, founder decision D-073)" >&2; exit 2; }
+# Admin screens resolve, void and reissue questions: never sent to DeepSeek, whatever the Risk line or the override
+# (m1.1 O2). Judged on TASK §3 (ownership): any path with an `admin` segment or an admin.<ext> file, case-insensitive.
+own=$(awk '/^## /{ s = ($0 ~ /^## 3\./) } s' "$task")
+if printf '%s\n' "$own" | grep -Eqi -e '/admin([^A-Za-z0-9_-]|$)' -e '(^|[^A-Za-z0-9_-])admin(/|\.[A-Za-z0-9])'; then
+  echo "dispatch-deepseek: refused — admin surface in TASK §3 cannot go to DeepSeek even with DISPATCH_ALLOW_HIGH" >&2; exit 2; fi
+# A HIGH TASK without an ownership section cannot be checked for admin paths: refused (fail closed).
+if [ "$high" = 1 ] && [ -z "$own" ]; then
+  echo "dispatch-deepseek: refused — a Risk: HIGH TASK needs a ## 3. ownership section (checked for admin surfaces)" >&2; exit 2; fi
 branch=$(sed -n 's/^Branch: //p' "$task")
 [ "$(git -C "$wt" branch --show-current)" = "$branch" ] || { echo "dispatch-deepseek: branch mismatch" >&2; exit 2; }
 # Headless `claude -p` never shows the trust dialog and ignores a project's permission allow rules until the
@@ -58,14 +75,18 @@ ds_env() { base_env \
   CLAUDE_CODE_AUTO_COMPACT_WINDOW=786432 \
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
   "$@"; }
+# A HIGH lane says under which decision it goes, only once nothing can stop it any more (after the brief is read).
+d073() { [ "$high" = 0 ] || echo "dispatch-deepseek: HIGH lane sent to DeepSeek under founder decision D-073 (Opus contract + Opus review mandatory)" >&2; }
 # Smoke hook: every refusal above has run; stop before anything leaves the machine. Lists the NAMES of the variables
 # claude would receive (the real environment of the real wrapper, never the values).
 if [ "${DISPATCH_DRY_RUN:-0}" = 1 ]; then
+  d073
   echo "dispatch-deepseek: environment passed to claude (names only): $(ds_env env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' | sort | tr '\n' ' ')"
   echo "dispatch-deepseek: instrument after the run: $script --section $section"
   echo "dispatch-deepseek: checks passed (dry run, nothing dispatched)"; exit 0
 fi
 brief=$(sed "s|<ABS_WORKTREE>|$wt|g" "$wt/standards/prompts/dispatch-brief.md")
+d073
 cd "$wt"
 before=$(git rev-parse HEAD)
 rc=0
@@ -77,6 +98,12 @@ fail() { echo "dispatch-deepseek: $1" >&2; exit 1; }
 after=$(git rev-parse HEAD)
 { [ "$after" != "$before" ] && git merge-base --is-ancestor "$before" "$after" && [ "$(git branch --show-current)" = "$branch" ]; } \
   || fail "no commit (HEAD $after on $(git branch --show-current), expected new commits on $branch after $before)"
+# Admin screens never come from DeepSeek, whatever TASK §3 says: §3 may own a parent directory or a glob, so the
+# committed diff is judged with the classifier's rule (both sides of a rename; unquoted names), case-insensitive.
+# First of the post-run judgements: an admin commit is named as such, whatever else is wrong with the run.
+both=$(git -c core.quotePath=false diff --no-renames --name-only "$before" "$after") || fail "no commit (git diff $before $after failed)"
+admin=$(printf '%s\n' "$both" | grep -Ei '(^|/)admin(/|\.)' || true)
+[ -z "$admin" ] || { printf '%s\n' "$admin" | head -n 10 >&2; fail "lane changed an admin surface"; }
 # TASK.md is the coordinator's untracked brief; anything else left uncommitted means the lane did not finish.
 # Capture first, then filter: a failing git status must never read as a clean tree.
 st=$(git status --porcelain --untracked-files=all --ignore-submodules=none) || fail "dirty tree (git status failed)"

@@ -28,6 +28,12 @@ expect_fail(){ [ $# -eq 3 ] || { bad "$1 (smoke bug: expect_fail needs a diagnos
   elif [ $rc -eq 0 ]; then bad "$1 (expected failure, got success)"
   else bad "$1 (harness error rc=$rc)"; tail -n 5 $T/o; fi; }
 expect_ok(){ if sh -c "$2" >$T/o 2>&1; then ok "$1"; else bad "$1"; tail -n 20 $T/o; fi; }
+# Expected successes that must also SAY the right thing (an informational gate always exits 0, so exit 0 alone proves
+# nothing): exit 0 AND every given extended regex found in the output; a red names the rc and each missing regex.
+expect_ok_out(){ [ $# -ge 3 ] || { bad "$1 (smoke bug: expect_ok_out needs at least one regex)"; return; }
+  eo_l=$1; eo_c=$2; shift 2; sh -c "$eo_c" >$T/o 2>&1; rc=$?; eo_miss=""
+  for eo_re in "$@"; do grep -Eq -- "$eo_re" $T/o || eo_miss="$eo_miss /$eo_re/"; done
+  if [ $rc -eq 0 ] && [ -z "$eo_miss" ]; then ok "$eo_l"; else bad "$eo_l (rc=$rc, want 0${eo_miss:+; missing$eo_miss})"; tail -n 8 $T/o; fi; }
 git config --global user.email s@t; git config --global user.name smoke; git config --global protocol.file.allow always
 git config --global init.defaultBranch main
 
@@ -155,23 +161,31 @@ case_ 11 'mkdir -p "NOTES.md docs" && echo x > "NOTES.md docs/run.sh"' HIGH "pat
 case_ 12 'echo x > docs/q\"b.md' HIGH "a path git has to quote (fail closed)" 'a path git had to quote'
 case_ 13 'rm -- "x*"' HIGH "deleted file literally named x* next to x.md"
 case_ 13b 'rm -- "NOTES*"' HIGH "deleted file literally named NOTES* next to NOTES.md (no glob expansion)"
+# The stderr lines are risk-gate's input (it prints them as the HIGH list): exactly one `high: <path>…` line per path.
+git checkout -q -b c14 main; mkdir -p api/src/payouts web/src/components/admin
+echo x > api/src/payouts/mod.rs; echo x > web/src/components/admin/QuestionCard.tsx; git add -A; git commit -qm c14
+got=$($C main HEAD 2>$T/ce); nh=$(grep -c '^high: ' $T/ce)
+if [ "$got" = HIGH ] && grep -q '^high: api/src/payouts/mod\.rs$' $T/ce && grep -q '^high: web/src/components/admin/QuestionCard\.tsx (admin surface)$' $T/ce && [ "$nh" -eq 2 ]; then
+  ok "classify: one high: line per HIGH path on stderr (the gate's input contract)"
+else bad "classify: one high: line per HIGH path on stderr (got $got, $nh high: lines, want HIGH and 2)"; cat $T/ce; fi
+git checkout -q main
 
-# --- 4. risk gate: founder approvals must be on the current head ---------------------------------
-G="$T/game/standards/bin/risk-gate"
-echo '[{"user":{"login":"fa"},"state":"APPROVED","commit_id":"new"}]' > $T/r1.json
-echo '[{"user":{"login":"fa"},"state":"APPROVED","commit_id":"old"}]' > $T/r2.json
-echo '[{"user":{"login":"bot"},"state":"APPROVED","commit_id":"new"}]' > $T/r3.json
-echo '[{"user":{"login":"fa"},"state":"APPROVED","commit_id":"new"},{"user":{"login":"fb"},"state":"APPROVED","commit_id":"new"}]' > $T/r4.json
-echo '[{"user":{"login":"fa"},"state":"APPROVED","commit_id":"new"},{"user":{"login":"fa"},"state":"CHANGES_REQUESTED","commit_id":"new"}]' > $T/r5.json
-expect_ok   "gate: HIGH + 1 founder approval on head (game, need 1)" "$G HIGH new $T/r1.json 1 fa,fb"
-expect_ok   "gate: reviews file given as a bare relative name, as the workflow does" "cd $T && $G HIGH new r1.json 1 fa,fb"
-expect_fail "gate: unreadable reviews file fails closed" "$G HIGH new $T/missing.json 1 fa,fb" 'risk-gate: could not count approvals'
-expect_fail "gate: approval on an older commit is stale" "$G HIGH new $T/r2.json 1 fa,fb" 'risk-gate: HIGH, only 0/1 founder approvals on current head new'
-expect_fail "gate: non-founder (bot) approval does not count" "$G HIGH new $T/r3.json 1 fa,fb" 'risk-gate: HIGH, only 0/1 founder approvals'
-expect_fail "gate: exchange needs 2, one approval blocks" "$G HIGH new $T/r1.json 2 fa,fb" 'risk-gate: HIGH, only 1/2 founder approvals'
-expect_ok   "gate: exchange with both founders passes" "$G HIGH new $T/r4.json 2 fa,fb"
-expect_fail "gate: later 'changes requested' overrides earlier approval" "$G HIGH new $T/r5.json 1 fa,fb" 'risk-gate: HIGH, only 0/1 founder approvals'
-expect_ok   "gate: LOW needs no founder" "$G LOW new $T/r3.json 1 fa,fb"
+# --- 4. risk gate: informational — lists HIGH paths, never blocks (solo developer, 2026-10-02) ---
+G="$T/game/standards/bin/risk-gate"; GH=0123456789abcdef0123456789abcdef01234567
+# Reasons files in classify-risk's stderr format: one `high: <path> [(<reason>)]` line per HIGH path.
+printf 'high: api/src/payouts/mod.rs\nhigh: web/src/components/admin/QuestionCard.tsx (admin surface)\n' > $T/g2.txt
+: > $T/g0.txt; rm -f $T/summary.md $T/missing.txt
+expect_ok_out "gate: HIGH PR → summary lists the HIGH paths, exit 0" "$G HIGH $GH $T/g2.txt" \
+  'review these paths before merging \(2 paths' '^  api/src/payouts/mod\.rs$' '^  web/src/components/admin/QuestionCard\.tsx \(admin surface\)$'
+expect_ok_out "gate: LOW PR → exit 0, no list" "$G LOW $GH $T/g0.txt" "^risk-gate: LOW — no HIGH paths in $GH\$"
+expect_ok_out "gate: unreadable reasons file still exits 0 and says so" "$G HIGH $GH $T/missing.txt" \
+  "^risk-gate: HIGH — reasons unavailable, review the whole diff of $GH\$" '^risk-gate: informational'
+expect_ok_out "gate: GITHUB_STEP_SUMMARY receives the list" "GITHUB_STEP_SUMMARY=$T/summary.md $G HIGH $GH $T/g2.txt >/dev/null && cat $T/summary.md" \
+  '^### risk-gate$' '^- api/src/payouts/mod\.rs$' '^- web/src/components/admin/QuestionCard\.tsx \(admin surface\)$'
+expect_ok_out "gate: empty level with a HIGH reasons file prints HIGH" "$G '' $GH $T/g2.txt" \
+  "^risk-gate: HIGH — reasons unavailable, review the whole diff of $GH\$" "^risk-gate: unknown level '' treated as HIGH\$"
+expect_ok_out "gate: LOW contradicted by high: lines prints HIGH with the note" "$G LOW $GH $T/g2.txt" \
+  '^risk-gate: HIGH — ' '^risk-gate: level LOW contradicts the reasons file' '^  api/src/payouts/mod\.rs$'
 
 # --- 5. reviewer isolation ---------------------------------------------------------------------
 RC="$T/game/standards/bin/review-checkout"; RV="$T/game/standards/bin/review-verify-clean"
@@ -232,6 +246,30 @@ dd_refused(){ # dd_refused <label> <regex>: a dry run with every other check sat
 dd_refused "dispatch-deepseek: refuses 'Risk: LOW' on line 20 of a HIGH TASK (header only)" 'not Risk: LOW'
 mktask LOW 'scripts/verify/mN.sh --section <lane>'
 dd_refused "dispatch-deepseek: refuses a TASK whose §5 names no instrument section" 'names no instrument section'
+# Founder override D-073 (2026-10-02): a HIGH TASK goes to DeepSeek only with DISPATCH_ALLOW_HIGH=1, never when its
+# §3 owns an admin surface (m1.1 O2). mktaskh <risk> <§3 path> writes a TASK with an ownership section.
+mktaskh(){ printf 'Branch: ds/ui-button\nBase: %s\nRisk: %s\n\n## 2. What this is\nsmoke lane\n\n## 3. Files you own\n- %s\n\n## 5. Verify\n- scripts/verify/m0.sh --section web\n\n## 6. Commit subject\nchore: smoke\n' "$(git rev-parse main)" "$1" "$2" > "$W/TASK.md"; }
+mktaskh HIGH 'web/src/components/player/Btn.tsx'
+dd_refused "dispatch: HIGH TASK refused without the override" 'not Risk: LOW'
+DISPATCH_ALLOW_HIGH=1 HOME=$T/h DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $W" >$T/o 2>&1; rc=$?
+if [ $rc -eq 0 ] && grep -q '^dispatch-deepseek: HIGH lane sent to DeepSeek under founder decision D-073 (Opus contract + Opus review mandatory)$' $T/o && grep -q 'checks passed' $T/o; then
+  ok "dispatch: HIGH TASK accepted with DISPATCH_ALLOW_HIGH=1 (dry run)"
+else bad "dispatch: HIGH TASK accepted with DISPATCH_ALLOW_HIGH=1 (dry run) (rc=$rc, want 0 + the D-073 line)"; tail -n 5 $T/o; fi
+mktaskh HIGH 'web/src/components/admin/QuestionCard.tsx'
+DISPATCH_ALLOW_HIGH=1 HOME=$T/h DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $W" >$T/o 2>&1; rc=$?
+if [ $rc -eq 2 ] && grep -q 'admin surface in TASK §3 cannot go to DeepSeek even with DISPATCH_ALLOW_HIGH' $T/o; then
+  ok "dispatch: HIGH TASK owning an admin path refused even with the override"
+else bad "dispatch: HIGH TASK owning an admin path refused even with the override (rc=$rc, want 2 + /admin surface in TASK §3/)"; tail -n 5 $T/o; fi
+dd_refused_env(){ # dd_refused_env <label> <NAME=value> <regex>: like dd_refused with one extra variable set
+  env "$2" HOME=$T/h DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $W" >$T/o 2>&1; rc=$?
+  if [ $rc -eq 2 ] && grep -Eq -- "$3" $T/o; then ok "$1"; else bad "$1 (rc=$rc, want 2 + /$3/)"; tail -n 5 $T/o; fi; }
+mktask HIGH 'scripts/verify/m0.sh --section web'
+dd_refused_env "dispatch: HIGH TASK without a ## 3. section refused even with the override" DISPATCH_ALLOW_HIGH=1 'needs a ## 3\. ownership section'
+mktaskh HIGH 'web/src/components/player/Btn.tsx'
+dd_refused_env "dispatch: DISPATCH_ALLOW_HIGH=true is not the override (exactly 1)" DISPATCH_ALLOW_HIGH=true 'not Risk: LOW'
+dd_refused_env "dispatch: DISPATCH_ALLOW_HIGH=yes is not the override (exactly 1)" DISPATCH_ALLOW_HIGH=yes 'not Risk: LOW'
+mktaskh LOW 'web/src/components/admin/QuestionCard.tsx'
+dd_refused "dispatch: LOW TASK owning an admin path refused" 'admin surface in TASK §3'
 mktask LOW 'scripts/verify/m0.sh --section web'
 # Retro review 13: claude gets an empty environment plus an allowlist; the dry run lists the names (never values).
 LEAK_PROBE=1 HOME=$T/h DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $W" >$T/o 2>&1; rc=$?
@@ -255,6 +293,11 @@ dd_outcome "dispatch-deepseek: a run that leaves the tree dirty is a failure, na
 dd_outcome "dispatch-deepseek: a run that commits a trivial instrument section is refused, named" "printf 'if section web; then expect_out trivial 0 . -- true; fi\n' >> scripts/verify/m0.sh && $SG commit -qam judge" 1 'dispatch-deepseek: lane changed its own judge'
 dd_outcome "dispatch-deepseek: a commit that breaks check is a failure, named" "perl -pi -e 's/a \\+ b/a - b/' web/src/math.ts && $SG commit -qam break" 1 'dispatch-deepseek: check failed'
 grep -q '^FAIL  web unit tests' "$W/.lane-check.log" && ok "dispatch-deepseek: ... and check failed on the broken unit test (its own reason)" || { bad "dispatch-deepseek check failure was not the broken unit test"; grep -E '^(FAIL|BLOCKED)' "$W/.lane-check.log"; }
+# §3 owns a parent directory, so the early text check passes; the committed diff is what is judged (review blocker).
+mktaskh LOW 'web/src/components/'
+dd_outcome "dispatch: a lane that commits an admin file under a parent-directory ownership is a failure, named" \
+  "mkdir -p web/src/components/admin && echo x > web/src/components/admin/X.tsx && git add web/src/components/admin/X.tsx && $SG commit -qm admin" 1 'dispatch-deepseek: lane changed an admin surface'
+mktask LOW 'scripts/verify/m0.sh --section web'
 if [ $RUST_OK -eq 1 ]; then
   mktask LOW 'scripts/verify/m0.sh --section wrongname'
   dd_outcome "dispatch-deepseek: a green check with a red instrument section is a failure, named" "echo x > stub.md && git add stub.md && $SG commit -qm docs" 1 'dispatch-deepseek: instrument section failed'
@@ -271,7 +314,7 @@ grep -rq 'deepseek' "$H/agents" && bad "agent files reference deepseek" || ok "C
 blk "live DeepSeek run (needs DS_API_KEY + claude CLI) — first LOW lane in G0"
 
 # --- 6. needs a real GitHub org --------------------------------------------------------------------
-blk "GitHub rulesets (2 approvals on exchange, stale-approval dismissal, risk-gate as required check) — run the G0 merge-control test PRs in the real org"
+blk "GitHub rulesets — not needed while the founder is the only merger (risk-gate is informational); revisit when a collaborator joins"
 blk "reusable risk-gate and CI workflows (pinned standards checkout, gitleaks CLI, web job) — run on a real PR in the org"
 blk "OS-level isolation (no Docker socket/credentials in worker containers) — verify on the dev machine"
 echo; [ $R -eq 0 ] && echo "SMOKE: all runnable checks passed" || echo "SMOKE: FAILURES above"; exit $R

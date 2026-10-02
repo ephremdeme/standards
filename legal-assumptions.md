@@ -6,4 +6,5 @@
 | Personal data collected in Ethiopia stored in Ethiopia (Proc. 1321/2024) | 2026-09-30 | 2027-03-31 | Local hosting; data-flow doc |
 | Prize promotions are regulated | 2026-09-30 | 2026-11-30 | Status-only rewards |
 | Old ELS rules (21+, prize cap, commission basis) may return | 2026-09-30 | at relaunch | Config values, never constants |
+| Minimum age for the free prediction game: 18, self-attested in-app (old ELS rules were 21+; may return) | 2026-10-02 | 2026-11-30 | config `min_age` (as_of/review_by), never a constant; the pick trigger refuses unconfirmed users |
 A row past its review-by date blocks the next milestone PR until re-checked.
