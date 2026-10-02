@@ -3,7 +3,7 @@
 ## Game — integration branch per milestone; the founder merges the milestone PR after CI green and the risk-gate HIGH list
 | # | Scope | Human gate |
 |---|---|---|
-| G0 | Repo, pinned standards submodule, `check` + instrument lib, CI + `risk-gate`, rulesets + merge-control test PRs, worker containers, threat model, data-flow doc, deploy + encrypted backup + restore drill on staging (fake data), `smoke/run.sh` green incl. Rust | Founders confirm merge-control tests and restore drill |
+| G0 | Repo, pinned standards submodule, `check` + instrument lib, CI + `risk-gate`, informational risk-gate (rulesets not needed while the founder is the only merger), worker containers, threat model, data-flow doc, deploy + encrypted backup + restore drill on staging (fake data), `smoke/run.sh` green incl. Rust | Founders confirm merge-control tests and restore drill |
 | G1 | Questions from fixture templates (human approves), lock timing per specs §1, void-and-reissue, freeze, kickoff-change alert + auto-lock, resolve/void with evidence + correction note, repeatable points | Founders run the pick→lock→result flow |
 | G2 | Auth (per open login decision), initData verification + abuse controls, sessions, age gate, account recovery, data export/delete | Founders try takeover/abuse cases from the report |
 | G3 | Invite groups, accuracy leaderboards, club badge (rankings hidden), participation + hot streaks, opt-in reminders via outbox (specs §2) | — |

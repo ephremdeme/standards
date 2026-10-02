@@ -182,6 +182,10 @@ expect_ok_out "gate: unreadable reasons file still exits 0 and says so" "$G HIGH
   "^risk-gate: HIGH — reasons unavailable, review the whole diff of $GH\$" '^risk-gate: informational'
 expect_ok_out "gate: GITHUB_STEP_SUMMARY receives the list" "GITHUB_STEP_SUMMARY=$T/summary.md $G HIGH $GH $T/g2.txt >/dev/null && cat $T/summary.md" \
   '^### risk-gate$' '^- api/src/payouts/mod\.rs$' '^- web/src/components/admin/QuestionCard\.tsx \(admin surface\)$'
+expect_ok_out "gate: empty level with a HIGH reasons file prints HIGH" "$G '' $GH $T/g2.txt" \
+  "^risk-gate: HIGH — reasons unavailable, review the whole diff of $GH\$" "^risk-gate: unknown level '' treated as HIGH\$"
+expect_ok_out "gate: LOW contradicted by high: lines prints HIGH with the note" "$G LOW $GH $T/g2.txt" \
+  '^risk-gate: HIGH — ' '^risk-gate: level LOW contradicts the reasons file' '^  api/src/payouts/mod\.rs$'
 
 # --- 5. reviewer isolation ---------------------------------------------------------------------
 RC="$T/game/standards/bin/review-checkout"; RV="$T/game/standards/bin/review-verify-clean"
@@ -256,6 +260,16 @@ DISPATCH_ALLOW_HIGH=1 HOME=$T/h DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $
 if [ $rc -eq 2 ] && grep -q 'admin surface in TASK §3 cannot go to DeepSeek even with DISPATCH_ALLOW_HIGH' $T/o; then
   ok "dispatch: HIGH TASK owning an admin path refused even with the override"
 else bad "dispatch: HIGH TASK owning an admin path refused even with the override (rc=$rc, want 2 + /admin surface in TASK §3/)"; tail -n 5 $T/o; fi
+dd_refused_env(){ # dd_refused_env <label> <NAME=value> <regex>: like dd_refused with one extra variable set
+  env "$2" HOME=$T/h DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $W" >$T/o 2>&1; rc=$?
+  if [ $rc -eq 2 ] && grep -Eq -- "$3" $T/o; then ok "$1"; else bad "$1 (rc=$rc, want 2 + /$3/)"; tail -n 5 $T/o; fi; }
+mktask HIGH 'scripts/verify/m0.sh --section web'
+dd_refused_env "dispatch: HIGH TASK without a ## 3. section refused even with the override" DISPATCH_ALLOW_HIGH=1 'needs a ## 3\. ownership section'
+mktaskh HIGH 'web/src/components/player/Btn.tsx'
+dd_refused_env "dispatch: DISPATCH_ALLOW_HIGH=true is not the override (exactly 1)" DISPATCH_ALLOW_HIGH=true 'not Risk: LOW'
+dd_refused_env "dispatch: DISPATCH_ALLOW_HIGH=yes is not the override (exactly 1)" DISPATCH_ALLOW_HIGH=yes 'not Risk: LOW'
+mktaskh LOW 'web/src/components/admin/QuestionCard.tsx'
+dd_refused "dispatch: LOW TASK owning an admin path refused" 'admin surface in TASK §3'
 mktask LOW 'scripts/verify/m0.sh --section web'
 # Retro review 13: claude gets an empty environment plus an allowlist; the dry run lists the names (never values).
 LEAK_PROBE=1 HOME=$T/h DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $W" >$T/o 2>&1; rc=$?
@@ -279,6 +293,11 @@ dd_outcome "dispatch-deepseek: a run that leaves the tree dirty is a failure, na
 dd_outcome "dispatch-deepseek: a run that commits a trivial instrument section is refused, named" "printf 'if section web; then expect_out trivial 0 . -- true; fi\n' >> scripts/verify/m0.sh && $SG commit -qam judge" 1 'dispatch-deepseek: lane changed its own judge'
 dd_outcome "dispatch-deepseek: a commit that breaks check is a failure, named" "perl -pi -e 's/a \\+ b/a - b/' web/src/math.ts && $SG commit -qam break" 1 'dispatch-deepseek: check failed'
 grep -q '^FAIL  web unit tests' "$W/.lane-check.log" && ok "dispatch-deepseek: ... and check failed on the broken unit test (its own reason)" || { bad "dispatch-deepseek check failure was not the broken unit test"; grep -E '^(FAIL|BLOCKED)' "$W/.lane-check.log"; }
+# §3 owns a parent directory, so the early text check passes; the committed diff is what is judged (review blocker).
+mktaskh LOW 'web/src/components/'
+dd_outcome "dispatch: a lane that commits an admin file under a parent-directory ownership is a failure, named" \
+  "mkdir -p web/src/components/admin && echo x > web/src/components/admin/X.tsx && git add web/src/components/admin/X.tsx && $SG commit -qm admin" 1 'dispatch-deepseek: lane changed an admin surface'
+mktask LOW 'scripts/verify/m0.sh --section web'
 if [ $RUST_OK -eq 1 ]; then
   mktask LOW 'scripts/verify/m0.sh --section wrongname'
   dd_outcome "dispatch-deepseek: a green check with a red instrument section is a failure, named" "echo x > stub.md && git add stub.md && $SG commit -qm docs" 1 'dispatch-deepseek: instrument section failed'

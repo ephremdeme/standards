@@ -1,6 +1,6 @@
 #!/bin/sh
 # Usage: standards/bin/dispatch-deepseek <ABS_WORKTREE> [effort: high|max]
-# Runs a LOW-risk lane headless: Claude Code harness, DeepSeek model. Env vars follow DeepSeek's official guide
+# Runs a lane headless (LOW by default; HIGH only under DISPATCH_ALLOW_HIGH=1, D-073): Claude Code harness, DeepSeek model. Env vars follow DeepSeek's official guide
 # (api-docs.deepseek.com/quick_start/agent_integrations/claude_code); effort defaults to high (guide uses max).
 # Web tools disabled: lanes need none, and DeepSeek web search adds token cost and injection surface.
 # DeepSeek settings exist ONLY in this process. HIGH lanes are refused unless DISPATCH_ALLOW_HIGH is exactly 1
@@ -75,16 +75,18 @@ ds_env() { base_env \
   CLAUDE_CODE_AUTO_COMPACT_WINDOW=786432 \
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
   "$@"; }
-# Every refusal has run: a HIGH lane proceeds only now, and says under which decision.
-[ "$high" = 0 ] || echo "dispatch-deepseek: HIGH lane sent to DeepSeek under founder decision D-073 (Opus contract + Opus review mandatory)" >&2
+# A HIGH lane says under which decision it goes, only once nothing can stop it any more (after the brief is read).
+d073() { [ "$high" = 0 ] || echo "dispatch-deepseek: HIGH lane sent to DeepSeek under founder decision D-073 (Opus contract + Opus review mandatory)" >&2; }
 # Smoke hook: every refusal above has run; stop before anything leaves the machine. Lists the NAMES of the variables
 # claude would receive (the real environment of the real wrapper, never the values).
 if [ "${DISPATCH_DRY_RUN:-0}" = 1 ]; then
+  d073
   echo "dispatch-deepseek: environment passed to claude (names only): $(ds_env env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' | sort | tr '\n' ' ')"
   echo "dispatch-deepseek: instrument after the run: $script --section $section"
   echo "dispatch-deepseek: checks passed (dry run, nothing dispatched)"; exit 0
 fi
 brief=$(sed "s|<ABS_WORKTREE>|$wt|g" "$wt/standards/prompts/dispatch-brief.md")
+d073
 cd "$wt"
 before=$(git rev-parse HEAD)
 rc=0
@@ -96,6 +98,12 @@ fail() { echo "dispatch-deepseek: $1" >&2; exit 1; }
 after=$(git rev-parse HEAD)
 { [ "$after" != "$before" ] && git merge-base --is-ancestor "$before" "$after" && [ "$(git branch --show-current)" = "$branch" ]; } \
   || fail "no commit (HEAD $after on $(git branch --show-current), expected new commits on $branch after $before)"
+# Admin screens never come from DeepSeek, whatever TASK §3 says: §3 may own a parent directory or a glob, so the
+# committed diff is judged with the classifier's rule (both sides of a rename; unquoted names), case-insensitive.
+# First of the post-run judgements: an admin commit is named as such, whatever else is wrong with the run.
+both=$(git -c core.quotePath=false diff --no-renames --name-only "$before" "$after") || fail "no commit (git diff $before $after failed)"
+admin=$(printf '%s\n' "$both" | grep -Ei '(^|/)admin(/|\.)' || true)
+[ -z "$admin" ] || { printf '%s\n' "$admin" | head -n 10 >&2; fail "lane changed an admin surface"; }
 # TASK.md is the coordinator's untracked brief; anything else left uncommitted means the lane did not finish.
 # Capture first, then filter: a failing git status must never read as a clean tree.
 st=$(git status --porcelain --untracked-files=all --ignore-submodules=none) || fail "dirty tree (git status failed)"
