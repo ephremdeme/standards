@@ -15,6 +15,7 @@ Risk: <set LOW or HIGH — from classify-risk on expected paths; coordinator may
 
 ## 4. Hard rules for this lane
 - <e.g. no new dependencies; uses outbox; lock via DB trigger>
+- Standing rules from past reviews (docs/06 "Never"): take row locks fixture → question, never the reverse; every error path fails closed (a failed command, an empty read or a missing file is a refusal, never a pass); validate every value read from config, env or a request before use; a control is red for its own reason (its own assertion message, not just a failed count); `.env` is data, never sourced; risk is judged by what a path does, never by where it sits.
 
 ## 5. Verify (three cycles: red batch of the new tests, green batch, controls; then once each at the end — report one line per command)
 - standards/bin/check
