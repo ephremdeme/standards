@@ -22,6 +22,16 @@ for r in "$ws"/*/; do [ -d "$r" ] && in_ws=$((in_ws + $(lanes_in "${r%/}"))); do
 git -C "$top" worktree add -q "$wt" -b "$branch" "$base"
 # Lanes need the repo's local placeholders (DATABASE_URL of the dev Postgres); .env.example holds no secrets.
 [ -f "$top/.env.example" ] && [ ! -f "$wt/.env" ] && cp "$top/.env.example" "$wt/.env"
+# One build cache per repo (docs/07 §2 10): a Rust lane builds into the primary checkout's target directory, so no lane
+# pays a cold build and parallel lanes cannot fill the disk with one target directory each. The per-worktree
+# .cargo/config.toml is excluded through the shared info/exclude, so it never shows up in a lane's diff or status.
+if [ -f "$top/Cargo.toml" ]; then
+  mkdir -p "$wt/.cargo"
+  printf '# written by standards/bin/new-lane.sh: shared build cache of the primary checkout\n[build]\ntarget-dir = "%s/target"\n' "$top" > "$wt/.cargo/config.toml"
+  excl="$(git -C "$top" rev-parse --path-format=absolute --git-common-dir)/info/exclude"
+  mkdir -p "$(dirname "$excl")"
+  grep -qx '/.cargo/config.toml' "$excl" 2>/dev/null || printf '/.cargo/config.toml\n' >> "$excl"
+fi
 # The pinned standards come from the primary checkout's own copy (no network, works before the tag is pushed).
 git -C "$wt" -c protocol.file.allow=always -c "submodule.standards.url=$top/standards" submodule update -q --init
 # The TASK template comes from the pinned standards; inside the standards repo itself, from its own templates/.

@@ -12,7 +12,8 @@ want(){ # want <label> <rc> <regex> <cmd...>
 export GIT_CONFIG_GLOBAL=/dev/null GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 # A workspace with two product repos, each carrying a plain copy of standards (templates and bin are what the script needs).
 mk_repo(){ git init -q -b main "$1"; cp -r "$S" "$1/standards"; rm -rf "$1/standards/.git"; printf '.worktrees/\n.env\n' > "$1/.gitignore"
-  printf 'DATABASE_URL=postgres://placeholder\n' > "$1/.env.example"; git -C "$1" add -A; git -C "$1" commit -qm base; }
+  printf 'DATABASE_URL=postgres://placeholder\n' > "$1/.env.example"; printf '[package]\nname = "x"\nversion = "0.0.0"\n' > "$1/Cargo.toml"
+  git -C "$1" add -A; git -C "$1" commit -qm base; }
 mk_repo "$T/a"; mk_repo "$T/b"
 NL="standards/bin/new-lane.sh"
 lane(){ (cd "$1" && sh "$NL" "$2" main); }
@@ -23,6 +24,11 @@ want "control: branch name starting with - refused (exit 2)" 2 'new-lane: invali
 [ -z "$(ls -A "$T/a/.worktrees" 2>/dev/null)" ] && [ -z "$(git -C "$T/a" branch --list 'opus/a*')" ] && ok "refused branch names created no worktree and no branch" || bad "a refused branch name left a worktree or branch behind"
 want "repo a: lane 1 accepted" 0 'branch: opus/one' lane "$T/a" opus/one
 [ -f "$T/a/.worktrees/opus-one/.env" ] && ok "lane worktree seeded with .env from .env.example" || bad "lane worktree has no .env"
+# One build cache per repo (docs/07 §2 10): the lane's cargo config points at the primary checkout's target dir and
+# is excluded from status, so it never enters a lane's diff.
+A=$(cd "$T/a" && pwd -P)
+grep -qx "target-dir = \"$A/target\"" "$T/a/.worktrees/opus-one/.cargo/config.toml" 2>/dev/null && ok "lane worktree shares the primary checkout's cargo target dir" || bad "lane worktree has no shared cargo target dir"
+[ -z "$(git -C "$T/a/.worktrees/opus-one" status --porcelain --untracked-files=all | grep -v '^?? TASK.md$')" ] && ok "the shared-cache config is excluded from the lane's status (only TASK.md is untracked)" || bad "the shared-cache config shows up in the lane's status"
 want "repo a: lane 2 accepted" 0 'branch: opus/two' lane "$T/a" opus/two
 want "control: repo a lane 3 refused (per-repo limit 2)" 1 'wip limit: 2 lanes already in .*(max 2 per repo)' lane "$T/a" opus/three
 [ -d "$T/a/.worktrees/opus-three" ] && bad "refused lane still created a worktree" || ok "refused lane created nothing"
