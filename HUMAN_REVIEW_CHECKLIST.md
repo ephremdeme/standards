@@ -14,7 +14,7 @@ Read: the milestone report (docs/md-reports/), specs/milestones/mN.md, the spec 
 - [ ] Resolving or voiding twice can't double-count points; users see corrections.
 - [ ] Someone outside a group or without admin rights can't read or change it (the report names the tests).
 
-## Exchange milestones (both founders)
+## Exchange milestones (founder; no second approver — the ledger checker and invariant tests stand in)
 - [ ] The business rules match what we decided (order matching, fees, void policy, limits) — walk through one example trade end-to-end in the report.
 - [ ] The independent ledger checker ran green on every test run, and its negative control (a deliberately broken ledger) ran red.
 - [ ] Concurrency tests exist for overspending and double settlement.

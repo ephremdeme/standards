@@ -1,22 +1,18 @@
-# .github/workflows/risk-gate.yml in each product repo — make "risk-gate / risk-gate" a REQUIRED status check.
+# .github/workflows/risk-gate.yml in each product repo — informational check: lists the HIGH paths of the PR in its summary; always green (solo developer, founder decision 2026-10-02).
 # Thin caller (retro review 6): the gate runs the classifier and risk-gate scripts of the PINNED standards commit,
 # checked out on its own by the reusable workflow — never the copy in this pull request's standards submodule.
 # Put the SAME full standards commit SHA in both places below (uses: …@<SHA> and standards_ref: <SHA>).
 # Limit: a pull request can still edit THIS file (repoint it at another SHA, drop the job), and on pull_request events
-# the edited copy is the one that runs. Only rulesets / merge queues close that and they are deferred to the founders
-# (GitHub Free has none; merge control is honour-system, docs/07 §2 7a): founders refuse any PR that touches
-# .github/workflows/ without their own review.
+# the edited copy is the one that runs, so its HIGH list can be forged. Only rulesets / merge queues close that and
+# they are not used while the founder is the only merger (docs/07 §2 7a): the founder reads the diff of
+# .github/workflows/ in every PR before trusting the list.
 name: risk-gate
 on:
   pull_request: { types: [opened, synchronize, reopened, ready_for_review] }
-  pull_request_review: { types: [submitted, dismissed, edited] }
 permissions:
   contents: read
-  pull-requests: read   # the gate lists the pull request's reviews
 jobs:
   risk-gate:
     uses: <org>/standards/.github/workflows/risk-gate.yml@<STANDARDS_SHA>
     with:
       standards_ref: <STANDARDS_SHA>        # the same SHA as on the uses: line
-      required_approvals: "1"               # exchange repo: "2"
-      founders: "founder-a,founder-b"       # GitHub logins

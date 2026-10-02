@@ -1,16 +1,89 @@
 #!/bin/sh
-# Required status check logic. Usage: risk-gate <LOW|HIGH> <head_sha> <reviews.json> <required_approvals> <founder1,founder2>
-# reviews.json = GitHub "list reviews for a pull request" response.
-# HIGH passes only if >= required distinct founders' LATEST review is APPROVED *on head_sha*.
+# risk-gate — INFORMATIONAL (solo developer, founder decision 2026-10-02). GitHub forbids approving your own pull
+# request, so a gate that counts founder approvals can never pass; this one counts nothing and ALWAYS EXITS 0. It
+# lists the HIGH paths so the founder, the only merger, reads them together with the milestone report. The decision
+# that fails closed stays in classify-risk (it prints HIGH and exits 1 when it cannot judge); this script never
+# downgrades it.
+# Usage: risk-gate <LOW|HIGH> <head_sha> <reasons_file>
+#   reasons_file = classify-risk's stderr: zero or more `high: <path> (<reason>)` / `high: <path>` lines, plus
+#   possibly one `classify-risk: … — HIGH (fail closed)` line.
+# HIGH is never hidden: an unknown level, a LOW the reasons file contradicts, or reasons that are missing, unreadable,
+# empty or from a classifier that failed closed all print HIGH and "review the whole diff". Only paths read from the
+# reasons file are printed: to stdout and, when GITHUB_STEP_SUMMARY is set and non-empty, appended to that file.
 set -u
-level=$1; head=$2; reviews=$3; need=$4; founders=$5
-[ "$level" = LOW ] && { echo "risk-gate: LOW, no founder approval needed"; exit 0; }
-# The file is read, not require()d: a bare name such as `reviews.json` is a module name to node (first CI run, game PR #1).
-n=$(node -e '
-const [f,head,founders]=process.argv.slice(1); const r=JSON.parse(require("fs").readFileSync(f,"utf8")); const F=founders.split(",");
-const latest={}; for (const x of r) { if(!F.includes(x.user.login)) continue; if (x.state==="COMMENTED") continue; latest[x.user.login]=x; }
-console.log(Object.values(latest).filter(x=>x.state==="APPROVED" && x.commit_id===head).length);
-' "$reviews" "$head" "$founders") || n=""
-case "$n" in ''|*[!0-9]*) echo "risk-gate: could not count approvals (reviews file unreadable or malformed)"; exit 1;; esac
-if [ "$n" -ge "$need" ]; then echo "risk-gate: HIGH, $n/$need founder approvals on $head"; exit 0; fi
-echo "risk-gate: HIGH, only $n/$need founder approvals on current head $head"; exit 1
+level=${1-}; head=${2-}; reasons=${3-}
+NL='
+'
+INFO="risk-gate: informational (solo developer, founder decision 2026-10-02) — the founder merges after reading this list and the milestone report"
+
+# Every value is checked before it is printed: the head must be a hex commit id, the level LOW or HIGH.
+case "$head" in ''|*[!0-9a-f]*) head="(invalid head sha)";; esac
+[ ${#head} -le 64 ] || head="(invalid head sha)"
+note=""
+case "$level" in
+  LOW|HIGH) ;;
+  *) shown=$level
+     case "$shown" in *[!A-Za-z0-9_.-]*) shown="(unexpected characters)";; esac
+     [ ${#shown} -le 32 ] || shown="(too long)"
+     note="risk-gate: unknown level '$shown' treated as HIGH"; level=UNKNOWN;;
+esac
+
+# Read the reasons file once, through cat in a command substitution: a file that vanishes or cannot be read leaves
+# the content empty (a failed redirection on a compound command could end the shell with a non-zero status).
+content=""
+if [ -n "$reasons" ] && [ -f "$reasons" ] && [ -r "$reasons" ]; then content=$(cat -- "$reasons" 2>/dev/null) || content=""; fi
+n=0; paths=""; diag=""
+set -f; IFS=$NL
+for line in $content; do
+  case "$line" in
+    'high: '?*) n=$((n + 1)); paths="$paths${line#high: }$NL";;
+    'classify-risk: '*) diag="$diag$line$NL";;
+  esac
+done
+unset IFS; set +f
+
+if [ "$level" = LOW ] && [ "$n" -eq 0 ] && [ -z "$diag" ]; then
+  out="risk-gate: LOW — no HIGH paths in $head"
+  printf '%s\n' "$out"
+  md="### risk-gate$NL$NL$out$NL"
+else
+  [ "$level" = LOW ] && note="risk-gate: level LOW contradicts the reasons file (HIGH paths or a fail-closed classifier line) — treated as HIGH"
+  intro=""
+  if [ "$level" = HIGH ] && [ "$n" -gt 0 ] && [ -z "$diag" ]; then
+    top="risk-gate: HIGH — review these paths before merging ($n paths, head $head):"
+  else
+    top="risk-gate: HIGH — reasons unavailable, review the whole diff of $head"
+    [ "$n" -eq 0 ] || intro="risk-gate: the reasons file names $n paths (the list may be incomplete):"
+  fi
+  # A path such as `::add-mask::HIGH` would be a workflow command to the Actions runner (it trims leading spaces):
+  # command processing is paused, with an unguessable token, while text read from the file is printed.
+  tok=""
+  if [ "${GITHUB_ACTIONS:-}" = true ]; then
+    tok=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n') || tok=""
+    case "$tok" in ''|*[!0-9a-f]*) tok="risk-gate-$$-$(date +%s)";; esac
+    printf '::stop-commands::%s\n' "$tok"
+  fi
+  printf '%s\n' "$top"
+  [ -z "$note" ] || printf '%s\n' "$note"
+  printf '%s' "$diag" | sed 's/^/  /'
+  [ -z "$intro" ] || printf '%s\n' "$intro"
+  printf '%s' "$paths" | sed 's/^/  /'
+  printf '%s\n' "$INFO"
+  [ -z "$tok" ] || printf '::%s::\n' "$tok"
+  # The summary is Markdown: text read from the file is backslash-escaped so a path cannot open an HTML comment,
+  # a code span or a link that hides the lines after it.
+  esc='s/[][\\`*_{}<>&|!~#$]/\\&/g'
+  md="### risk-gate$NL$NL$top$NL$NL"
+  [ -z "$note" ] || md="$md$note$NL$NL"
+  [ -z "$diag" ] || md="$md$(printf '%s' "$diag" | sed -e "$esc" -e 's/^/- /')$NL$NL"
+  [ -z "$intro" ] || md="$md$intro$NL$NL"
+  [ -z "$paths" ] || md="$md$(printf '%s' "$paths" | sed -e "$esc" -e 's/^/- /')$NL$NL"
+  md="$md$INFO$NL"
+fi
+
+# Appended (never truncated), only when the variable is set and non-empty; a failure to write is reported on stderr
+# and changes nothing else (the subshell keeps a redirection error from ending this script).
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+  ( printf '%s' "$md" >> "$GITHUB_STEP_SUMMARY" ) 2>/dev/null || echo "risk-gate: could not append to GITHUB_STEP_SUMMARY" >&2
+fi
+exit 0

@@ -9,7 +9,7 @@ Lanes read only their TASK.md and what it lists.
 1. The unit of work and review is the lane: one worktree, one branch, one self-contained TASK.md, disjoint file ownership.
 2. The milestone instrument is committed and proven red per section before any lane starts. Every guard ships a negative control executed red (a database guard: a trigger-disabled control; a Rust-level guard: a mutant killed at merge).
 3. Verify on committed bytes only; self-reports carry no weight.
-4. Done is mechanized (instrument, controls, mutation run, CI); a review finding counts only once it is a failing test or check, else it goes to the NOTES backlog. HIGH lanes get one Opus review, LOW lanes none beyond the instrument; one fix round for blockers only; merge --no-ff into integration/mN when green with no blocker. One milestone review (Codex, Opus fallback) → one fix lane for blockers and majors, re-verified mechanically → the milestone PR. No third round (standards/docs/07 §2 5–7).
+4. Done is mechanized (instrument, controls, mutation run, CI); a review finding counts only once it is a failing test or check, else it goes to the NOTES backlog. HIGH lanes get one Opus review, LOW lanes none beyond the instrument; one fix round for blockers only; merge --no-ff into integration/mN when green with no blocker. One milestone review (Codex, Opus fallback) → one fix lane for blockers and majors, re-verified mechanically → the milestone PR. No third round (standards/docs/07 §2 5–7). The founder merges the milestone PR with CI green after reading the risk-gate HIGH list (informational gate, solo developer).
 5. Decide, don't escalate: only lasting decisions go to founders, max 4 per batch, recommendation first.
 6. State lives in files: DECISIONS.md, NOTES.md, docs/md-reports/.
 

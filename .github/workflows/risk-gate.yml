@@ -1,5 +1,8 @@
-# Reusable risk gate (retro review 6). Product repos call it through templates/risk-gate.yml, pinning ONE standards
-# commit SHA twice: in `uses: <org>/standards/.github/workflows/risk-gate.yml@<SHA>` and as `standards_ref: <SHA>`.
+# Reusable risk gate (retro review 6) — INFORMATIONAL (solo developer, founder decision 2026-10-02): GitHub forbids
+# approving your own pull request, so no approval is counted; the job classifies the PR, lists the HIGH paths with
+# their reasons in the log and the step summary, and is always green. The founder merges after reading that list.
+# Product repos call it through templates/risk-gate.yml, pinning ONE standards commit SHA twice: in
+# `uses: <org>/standards/.github/workflows/risk-gate.yml@<SHA>` and as `standards_ref: <SHA>`.
 # The classifier and the gate run from that pinned, trusted standards commit, checked out on its own — never from the
 # pull request's `standards` submodule, which the pull request itself could repoint at a classifier that prints LOW.
 name: risk-gate
@@ -10,17 +13,8 @@ on:
         description: "full commit SHA of the standards repo; the same SHA as in the caller's uses: line"
         type: string
         required: true
-      required_approvals:
-        description: "founder approvals a HIGH change needs on the current head (game 1, exchange 2)"
-        type: string
-        required: true
-      founders:
-        description: "comma-separated GitHub logins of the founders"
-        type: string
-        required: true
 permissions:
   contents: read
-  pull-requests: read
 jobs:
   risk-gate:
     runs-on: ubuntu-latest
@@ -44,23 +38,16 @@ jobs:
           fetch-depth: 0
           submodules: false
           persist-credentials: false
-      - name: classify and check approvals on the current head
+      - name: classify and list HIGH paths
         working-directory: product
         env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
-          PR: ${{ github.event.pull_request.number }}
-          REQUIRED_APPROVALS: ${{ inputs.required_approvals }}
-          FOUNDERS: ${{ inputs.founders }}
         run: |
-          set -eu
+          set -u
           trusted="$GITHUB_WORKSPACE/standards-trusted/bin"
           # classify-risk prints HIGH and exits 1 when the diff cannot be computed: that stays HIGH (fail closed).
-          level=$(sh "$trusted/classify-risk" "$BASE" "$HEAD") || level=HIGH
-          # gh's output goes to a file first and its exit status counts (set -e): a failed page can never shrink the
-          # review list that jq then joins (a pipe would report only jq's status).
-          gh api --paginate "repos/$REPO/pulls/$PR/reviews" --jq '.' > "$RUNNER_TEMP/review-pages.json"
-          jq -s 'add' "$RUNNER_TEMP/review-pages.json" > "$RUNNER_TEMP/reviews.json"
-          sh "$trusted/risk-gate" "$level" "$HEAD" "$RUNNER_TEMP/reviews.json" "$REQUIRED_APPROVALS" "$FOUNDERS"
+          # Its stderr (one `high: <path> (<reason>)` line per HIGH path) is the list risk-gate prints.
+          level=$(sh "$trusted/classify-risk" "$BASE" "$HEAD" 2>"$RUNNER_TEMP/reasons.txt") || level=HIGH
+          # Informational by decision: risk-gate always exits 0; it never prints LOW unless the classifier did.
+          sh "$trusted/risk-gate" "$level" "$HEAD" "$RUNNER_TEMP/reasons.txt"

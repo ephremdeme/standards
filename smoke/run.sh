@@ -28,6 +28,12 @@ expect_fail(){ [ $# -eq 3 ] || { bad "$1 (smoke bug: expect_fail needs a diagnos
   elif [ $rc -eq 0 ]; then bad "$1 (expected failure, got success)"
   else bad "$1 (harness error rc=$rc)"; tail -n 5 $T/o; fi; }
 expect_ok(){ if sh -c "$2" >$T/o 2>&1; then ok "$1"; else bad "$1"; tail -n 20 $T/o; fi; }
+# Expected successes that must also SAY the right thing (an informational gate always exits 0, so exit 0 alone proves
+# nothing): exit 0 AND every given extended regex found in the output; a red names the rc and each missing regex.
+expect_ok_out(){ [ $# -ge 3 ] || { bad "$1 (smoke bug: expect_ok_out needs at least one regex)"; return; }
+  eo_l=$1; eo_c=$2; shift 2; sh -c "$eo_c" >$T/o 2>&1; rc=$?; eo_miss=""
+  for eo_re in "$@"; do grep -Eq -- "$eo_re" $T/o || eo_miss="$eo_miss /$eo_re/"; done
+  if [ $rc -eq 0 ] && [ -z "$eo_miss" ]; then ok "$eo_l"; else bad "$eo_l (rc=$rc, want 0${eo_miss:+; missing$eo_miss})"; tail -n 8 $T/o; fi; }
 git config --global user.email s@t; git config --global user.name smoke; git config --global protocol.file.allow always
 git config --global init.defaultBranch main
 
@@ -156,22 +162,18 @@ case_ 12 'echo x > docs/q\"b.md' HIGH "a path git has to quote (fail closed)" 'a
 case_ 13 'rm -- "x*"' HIGH "deleted file literally named x* next to x.md"
 case_ 13b 'rm -- "NOTES*"' HIGH "deleted file literally named NOTES* next to NOTES.md (no glob expansion)"
 
-# --- 4. risk gate: founder approvals must be on the current head ---------------------------------
-G="$T/game/standards/bin/risk-gate"
-echo '[{"user":{"login":"fa"},"state":"APPROVED","commit_id":"new"}]' > $T/r1.json
-echo '[{"user":{"login":"fa"},"state":"APPROVED","commit_id":"old"}]' > $T/r2.json
-echo '[{"user":{"login":"bot"},"state":"APPROVED","commit_id":"new"}]' > $T/r3.json
-echo '[{"user":{"login":"fa"},"state":"APPROVED","commit_id":"new"},{"user":{"login":"fb"},"state":"APPROVED","commit_id":"new"}]' > $T/r4.json
-echo '[{"user":{"login":"fa"},"state":"APPROVED","commit_id":"new"},{"user":{"login":"fa"},"state":"CHANGES_REQUESTED","commit_id":"new"}]' > $T/r5.json
-expect_ok   "gate: HIGH + 1 founder approval on head (game, need 1)" "$G HIGH new $T/r1.json 1 fa,fb"
-expect_ok   "gate: reviews file given as a bare relative name, as the workflow does" "cd $T && $G HIGH new r1.json 1 fa,fb"
-expect_fail "gate: unreadable reviews file fails closed" "$G HIGH new $T/missing.json 1 fa,fb" 'risk-gate: could not count approvals'
-expect_fail "gate: approval on an older commit is stale" "$G HIGH new $T/r2.json 1 fa,fb" 'risk-gate: HIGH, only 0/1 founder approvals on current head new'
-expect_fail "gate: non-founder (bot) approval does not count" "$G HIGH new $T/r3.json 1 fa,fb" 'risk-gate: HIGH, only 0/1 founder approvals'
-expect_fail "gate: exchange needs 2, one approval blocks" "$G HIGH new $T/r1.json 2 fa,fb" 'risk-gate: HIGH, only 1/2 founder approvals'
-expect_ok   "gate: exchange with both founders passes" "$G HIGH new $T/r4.json 2 fa,fb"
-expect_fail "gate: later 'changes requested' overrides earlier approval" "$G HIGH new $T/r5.json 1 fa,fb" 'risk-gate: HIGH, only 0/1 founder approvals'
-expect_ok   "gate: LOW needs no founder" "$G LOW new $T/r3.json 1 fa,fb"
+# --- 4. risk gate: informational — lists HIGH paths, never blocks (solo developer, 2026-10-02) ---
+G="$T/game/standards/bin/risk-gate"; GH=0123456789abcdef0123456789abcdef01234567
+# Reasons files in classify-risk's stderr format: one `high: <path> [(<reason>)]` line per HIGH path.
+printf 'high: api/src/payouts/mod.rs\nhigh: web/src/components/admin/QuestionCard.tsx (admin surface)\n' > $T/g2.txt
+: > $T/g0.txt; rm -f $T/summary.md $T/missing.txt
+expect_ok_out "gate: HIGH PR → summary lists the HIGH paths, exit 0" "$G HIGH $GH $T/g2.txt" \
+  'review these paths before merging \(2 paths' '^  api/src/payouts/mod\.rs$' '^  web/src/components/admin/QuestionCard\.tsx \(admin surface\)$'
+expect_ok_out "gate: LOW PR → exit 0, no list" "$G LOW $GH $T/g0.txt" "^risk-gate: LOW — no HIGH paths in $GH\$"
+expect_ok_out "gate: unreadable reasons file still exits 0 and says so" "$G HIGH $GH $T/missing.txt" \
+  "^risk-gate: HIGH — reasons unavailable, review the whole diff of $GH\$" '^risk-gate: informational'
+expect_ok_out "gate: GITHUB_STEP_SUMMARY receives the list" "GITHUB_STEP_SUMMARY=$T/summary.md $G HIGH $GH $T/g2.txt >/dev/null && cat $T/summary.md" \
+  '^### risk-gate$' '^- api/src/payouts/mod\.rs$' '^- web/src/components/admin/QuestionCard\.tsx \(admin surface\)$'
 
 # --- 5. reviewer isolation ---------------------------------------------------------------------
 RC="$T/game/standards/bin/review-checkout"; RV="$T/game/standards/bin/review-verify-clean"
@@ -271,7 +273,7 @@ grep -rq 'deepseek' "$H/agents" && bad "agent files reference deepseek" || ok "C
 blk "live DeepSeek run (needs DS_API_KEY + claude CLI) — first LOW lane in G0"
 
 # --- 6. needs a real GitHub org --------------------------------------------------------------------
-blk "GitHub rulesets (2 approvals on exchange, stale-approval dismissal, risk-gate as required check) — run the G0 merge-control test PRs in the real org"
+blk "GitHub rulesets — not needed while the founder is the only merger (risk-gate is informational); revisit when a collaborator joins"
 blk "reusable risk-gate and CI workflows (pinned standards checkout, gitleaks CLI, web job) — run on a real PR in the org"
 blk "OS-level isolation (no Docker socket/credentials in worker containers) — verify on the dev machine"
 echo; [ $R -eq 0 ] && echo "SMOKE: all runnable checks passed" || echo "SMOKE: FAILURES above"; exit $R
