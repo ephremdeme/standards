@@ -7,7 +7,7 @@
 | HIGH-risk lanes | Claude Opus 5.5 subagent `architect` |
 | LOW-risk lanes | DeepSeek V4.1 Flash via `standards/bin/dispatch-deepseek` (Claude Code harness, DeepSeek endpoint; `max` effort for hard LOW lanes). **Game repo only** — the exchange repo has `.no-deepseek`. |
 | Reviewer A | `reviewer` (Opus 5.5) for HIGH lanes; `reviewer-lite` (Sonnet 5) for LOW lanes. Never the author's model. |
-| Reviewer B (cross-vendor) | Codex via the `codex:codex-rescue` subagent (`--fresh`, adversarial brief) — **HIGH lanes only** |
+| Reviewer B (cross-vendor) | Codex via the `codex:codex-rescue` subagent (`--fresh`, adversarial brief) — **HIGH lanes only**. **Fallback (founder, 2026-10-02):** when Codex is usage-limited for more than an hour, Reviewer B is a fresh Opus session (the `reviewer` agent, new context, Reviewer A's findings withheld) with the same adversarial brief; the coordinator sizes the brief's scope and depth to the lane (a schema-and-locks lane gets the full attack list, a UI lane a shorter one) and records the fallback as a deviation in the report. |
 | Combined review | Coordinator + `/codex:adversarial-review --base main` on the assembled integration branch |
 | Independent review | Fresh session on a fresh clone with `standards/prompts/independent-review.md`, attacking every coordinator decision of the milestone |
 | Founders | Business-logic review of the milestone PR, decisions, Amharic, device tests |
