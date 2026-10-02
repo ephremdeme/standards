@@ -26,3 +26,5 @@ Risk: <set LOW or HIGH — from classify-risk on expected paths; coordinator may
 
 ## 7. Binding facts from the committed contract
 - <types, config keys, error codes the lane must use exactly>
+- tests: <file and test names the lane writes, one line each — the red batch runs exactly these>
+- controls (database guards only): <control test name — what it disables — its assertion message>

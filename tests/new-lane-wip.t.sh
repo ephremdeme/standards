@@ -24,11 +24,9 @@ want "control: branch name starting with - refused (exit 2)" 2 'new-lane: invali
 [ -z "$(ls -A "$T/a/.worktrees" 2>/dev/null)" ] && [ -z "$(git -C "$T/a" branch --list 'opus/a*')" ] && ok "refused branch names created no worktree and no branch" || bad "a refused branch name left a worktree or branch behind"
 want "repo a: lane 1 accepted" 0 'branch: opus/one' lane "$T/a" opus/one
 [ -f "$T/a/.worktrees/opus-one/.env" ] && ok "lane worktree seeded with .env from .env.example" || bad "lane worktree has no .env"
-# One build cache per repo (docs/07 §2 10): the lane's cargo config points at the primary checkout's target dir and
-# is excluded from status, so it never enters a lane's diff.
-A=$(cd "$T/a" && pwd -P)
-grep -qx "target-dir = \"$A/target\"" "$T/a/.worktrees/opus-one/.cargo/config.toml" 2>/dev/null && ok "lane worktree shares the primary checkout's cargo target dir" || bad "lane worktree has no shared cargo target dir"
-[ -z "$(git -C "$T/a/.worktrees/opus-one" status --porcelain --untracked-files=all | grep -v '^?? TASK.md$')" ] && ok "the shared-cache config is excluded from the lane's status (only TASK.md is untracked)" || bad "the shared-cache config shows up in the lane's status"
+# Lanes never share a cargo target dir (one lane could run another's compiled tests): no .cargo/ is written.
+[ ! -e "$T/a/.worktrees/opus-one/.cargo" ] && ok "lane worktree gets no cargo config of its own (separate target dir)" || bad "lane worktree got a .cargo/ config"
+[ -z "$(git -C "$T/a/.worktrees/opus-one" status --porcelain --untracked-files=all | grep -v '^?? TASK.md$')" ] && ok "a fresh lane's status shows only TASK.md" || bad "a fresh lane's status shows more than TASK.md"
 want "repo a: lane 2 accepted" 0 'branch: opus/two' lane "$T/a" opus/two
 want "control: repo a lane 3 refused (per-repo limit 2)" 1 'wip limit: 2 lanes already in .*(max 2 per repo)' lane "$T/a" opus/three
 [ -d "$T/a/.worktrees/opus-three" ] && bad "refused lane still created a worktree" || ok "refused lane created nothing"
