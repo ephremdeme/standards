@@ -1,6 +1,7 @@
 #!/bin/sh
 # Negative control for bin/new-lane.sh's WIP limit (docs/07 §2 7b): a 3rd lane in one repo and a 4th across the
 # workspace must be refused FOR THEIR OWN REASON (exit 1 + "wip limit: …"), never 2 (usage) or 126/127.
+# Invalid branch names are refused with exit 2 before anything is created (retro review 17).
 # Run: sh standards/tests/new-lane-wip.t.sh   -> exit 0 when all cases behave.
 set -u
 S=$(cd "$(dirname "$0")/.." && pwd); T=$(mktemp -d); R=0
@@ -15,6 +16,11 @@ mk_repo(){ git init -q -b main "$1"; cp -r "$S" "$1/standards"; rm -rf "$1/stand
 mk_repo "$T/a"; mk_repo "$T/b"
 NL="standards/bin/new-lane.sh"
 lane(){ (cd "$1" && sh "$NL" "$2" main); }
+# Retro review 17: a branch name is validated before anything else (sed replacement metacharacters, option-looking names).
+want "control: branch name with & refused (exit 2)" 2 'new-lane: invalid branch name' lane "$T/a" 'opus/a&b'
+want "control: branch name with | refused (exit 2)" 2 'new-lane: invalid branch name' lane "$T/a" 'opus/a|b'
+want "control: branch name starting with - refused (exit 2)" 2 'new-lane: invalid branch name' lane "$T/a" '-opus'
+[ -z "$(ls -A "$T/a/.worktrees" 2>/dev/null)" ] && [ -z "$(git -C "$T/a" branch --list 'opus/a*')" ] && ok "refused branch names created no worktree and no branch" || bad "a refused branch name left a worktree or branch behind"
 want "repo a: lane 1 accepted" 0 'branch: opus/one' lane "$T/a" opus/one
 [ -f "$T/a/.worktrees/opus-one/.env" ] && ok "lane worktree seeded with .env from .env.example" || bad "lane worktree has no .env"
 want "repo a: lane 2 accepted" 0 'branch: opus/two' lane "$T/a" opus/two

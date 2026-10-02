@@ -4,27 +4,49 @@
 # (api-docs.deepseek.com/quick_start/agent_integrations/claude_code); effort defaults to high (guide uses max).
 # Web tools disabled: lanes need none, and DeepSeek web search adds token cost and injection surface.
 # DeepSeek settings exist ONLY in this process. Never used for HIGH lanes or for repos marked .no-deepseek.
+# Refusals before dispatch exit 2. After the run the lane is judged on bytes and by judges it could not touch: it must
+# have added commits on its branch, left a clean tree (git errors and hidden index edits fail closed), changed nothing
+# under scripts/verify/, standards or .gitmodules, and then pass `check` and the instrument section named in TASK §5,
+# both read BEFORE the run (the instrument script is taken from the pre-run commit). Otherwise exit 1 naming the
+# reason (retro review 14 and its fix round).
 set -eu
 wt=${1:?absolute worktree path}; effort=${2:-high}
 [ -n "${DS_API_KEY:-}" ] || { echo "dispatch-deepseek: DS_API_KEY not set" >&2; exit 2; }
 top=$(git -C "$wt" rev-parse --show-toplevel)
-[ -f "$top/.no-deepseek" ] && { echo "dispatch-deepseek: refused — this repo never sends code to DeepSeek" >&2; exit 2; }
-grep -qx 'Risk: LOW' "$wt/TASK.md" || { echo "dispatch-deepseek: refused — TASK is not Risk: LOW" >&2; exit 2; }
-[ "$(git -C "$wt" branch --show-current)" = "$(sed -n 's/^Branch: //p' "$wt/TASK.md")" ] || { echo "dispatch-deepseek: branch mismatch" >&2; exit 2; }
+# The primary checkout (a lane worktree shares its object store and inherits its workspace trust).
+root=$(cd "$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)/.." && pwd -P)
+# .no-deepseek is judged on the PRIMARY checkout's committed tree (and the lane's), not only on the lane's files:
+# deleting or replacing the marker inside a lane changes nothing (retro review 12).
+if [ -e "$top/.no-deepseek" ] || git -C "$root" cat-file -e HEAD:.no-deepseek 2>/dev/null || git -C "$wt" cat-file -e HEAD:.no-deepseek 2>/dev/null; then
+  echo "dispatch-deepseek: refused — this repo never sends code to DeepSeek" >&2; exit 2; fi
+# Risk comes from the TASK header only: lines 1-3 hold exactly one `Risk: ` line, it reads `Risk: LOW`, and no other
+# line of the TASK starts with `Risk: ` (a `Risk: LOW` further down a HIGH TASK never counts; retro review 12).
+task=$wt/TASK.md
+[ -f "$task" ] || { echo "dispatch-deepseek: refused — no TASK.md in $wt" >&2; exit 2; }
+in_header=$(head -n 3 "$task" | grep -c '^Risk: ' || true); in_task=$(grep -c '^Risk: ' "$task" || true)
+if [ "$in_header" != 1 ] || [ "$in_task" != 1 ] || ! head -n 3 "$task" | grep -qx 'Risk: LOW'; then
+  echo "dispatch-deepseek: refused — TASK is not Risk: LOW (the header, lines 1-3, must hold the only Risk: line)" >&2; exit 2; fi
+branch=$(sed -n 's/^Branch: //p' "$task")
+[ "$(git -C "$wt" branch --show-current)" = "$branch" ] || { echo "dispatch-deepseek: branch mismatch" >&2; exit 2; }
 # Headless `claude -p` never shows the trust dialog and ignores a project's permission allow rules until the
 # REPOSITORY ROOT (the primary checkout — a lane worktree inherits it) was trusted once interactively. Fail fast with
 # the remedy instead of running a lane whose every tool call is auto-denied and whose untouched worktree would then
 # pass `check` (m1.1 O3). Read-only look at Claude's state; closed when the look is impossible.
-root=$(cd "$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)/.." && pwd -P)
 command -v jq >/dev/null 2>&1 || { echo "dispatch-deepseek: refused — jq is required for the workspace trust check" >&2; exit 2; }
 [ -r "$HOME/.claude.json" ] || { echo "dispatch-deepseek: refused — $HOME/.claude.json is unreadable, so $root is not a trusted Claude Code workspace here; run \`claude\` once inside it and accept the dialog" >&2; exit 2; }
 jq -e --arg p "$root" '.projects[$p].hasTrustDialogAccepted == true' "$HOME/.claude.json" >/dev/null 2>&1 \
   || { echo "dispatch-deepseek: refused — $root is not a trusted Claude Code workspace; run \`claude\` once inside it and accept the dialog" >&2; exit 2; }
-# Smoke hook: every refusal above has run; stop before anything leaves the machine.
-[ "${DISPATCH_DRY_RUN:-0}" = 1 ] && { echo "dispatch-deepseek: checks passed (dry run, nothing dispatched)"; exit 0; }
-brief=$(sed "s|<ABS_WORKTREE>|$wt|g" "$wt/standards/prompts/dispatch-brief.md")
-cd "$wt"
-env -u ANTHROPIC_API_KEY \
+# The lane's instrument section, read from TASK §5 BEFORE the run: the lane cannot rewrite what it is judged by.
+inst=$(awk '/^## /{ s = ($0 ~ /^## 5\./) } s' "$task" | sed -n 's/.*\(scripts\/verify\/m[0-9_]*\.sh\) --section \([a-z0-9_-][a-z0-9_-]*\).*/\1 \2/p' | head -n 1)
+[ -n "$inst" ] || { echo "dispatch-deepseek: refused — TASK §5 names no instrument section (scripts/verify/mN.sh --section <name>, N a number)" >&2; exit 2; }
+script=${inst% *}; section=${inst#* }
+# Retro review 13: nothing of the caller's environment reaches claude, check or the instrument except this allowlist
+# (SHELL included: Claude Code's Bash tool needs a shell). Secrets exported in the caller's shell stay there.
+allow="HOME PATH USER LANG LC_ALL TERM TMPDIR XDG_CONFIG_HOME SHELL"
+base_env() { # base_env <NAME=value ...> <cmd ...>: run with an empty environment plus the allowlisted variables that are set
+  for v in $allow; do if eval "[ -n \"\${$v+x}\" ]"; then eval "set -- \"$v=\${$v}\" \"\$@\""; fi; done
+  env -i "$@"; }
+ds_env() { base_env \
   ANTHROPIC_BASE_URL="https://api.deepseek.com/anthropic" \
   ANTHROPIC_AUTH_TOKEN="$DS_API_KEY" \
   ANTHROPIC_MODEL="deepseek-flash[1m]" \
@@ -34,8 +56,49 @@ env -u ANTHROPIC_API_KEY \
   CLAUDE_CODE_SUBAGENT_MODEL="deepseek-flash" \
   CLAUDE_CODE_EFFORT_LEVEL="$effort" \
   CLAUDE_CODE_AUTO_COMPACT_WINDOW=786432 \
-    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
-  claude -p "$brief" --permission-mode acceptEdits --disallowedTools WebSearch WebFetch > .lane-run.log 2>&1 || true
-# Verify on bytes, not on the report:
-if standards/bin/check > .lane-check.log 2>&1; then echo "check: OK"; else echo "check: FAILED (see .lane-check.log)"; exit 1; fi
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+  "$@"; }
+# Smoke hook: every refusal above has run; stop before anything leaves the machine. Lists the NAMES of the variables
+# claude would receive (the real environment of the real wrapper, never the values).
+if [ "${DISPATCH_DRY_RUN:-0}" = 1 ]; then
+  echo "dispatch-deepseek: environment passed to claude (names only): $(ds_env env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' | sort | tr '\n' ' ')"
+  echo "dispatch-deepseek: instrument after the run: $script --section $section"
+  echo "dispatch-deepseek: checks passed (dry run, nothing dispatched)"; exit 0
+fi
+brief=$(sed "s|<ABS_WORKTREE>|$wt|g" "$wt/standards/prompts/dispatch-brief.md")
+cd "$wt"
+before=$(git rev-parse HEAD)
+rc=0
+ds_env claude -p "$brief" --permission-mode acceptEdits --disallowedTools WebSearch WebFetch < /dev/null > .lane-run.log 2>&1 || rc=$?
 tail -n 20 .lane-run.log   # final report only; never read full transcripts
+# Verify on bytes, not on the report:
+fail() { echo "dispatch-deepseek: $1" >&2; exit 1; }
+[ "$rc" -eq 0 ] || fail "claude failed (rc=$rc)"
+after=$(git rev-parse HEAD)
+{ [ "$after" != "$before" ] && git merge-base --is-ancestor "$before" "$after" && [ "$(git branch --show-current)" = "$branch" ]; } \
+  || fail "no commit (HEAD $after on $(git branch --show-current), expected new commits on $branch after $before)"
+# TASK.md is the coordinator's untracked brief; anything else left uncommitted means the lane did not finish.
+# Capture first, then filter: a failing git status must never read as a clean tree.
+st=$(git status --porcelain --untracked-files=all --ignore-submodules=none) || fail "dirty tree (git status failed)"
+dirty=$(printf '%s\n' "$st" | grep -vx -e '?? TASK.md' -e '' || true)
+[ -z "$dirty" ] || { printf '%s\n' "$dirty" | head -n 10 >&2; fail "dirty tree"; }
+tags=$(git ls-files -v) || fail "dirty tree (git ls-files failed)"
+if printf '%s\n' "$tags" | grep -v -e '^H ' -e '^$' | grep -q .; then fail "dirty tree (hidden edits: skip-worktree or assume-unchanged entries)"; fi
+repl=$(git for-each-ref refs/replace) || fail "dirty tree (git for-each-ref failed)"
+[ -z "$repl" ] || fail "dirty tree (hidden edits: refs/replace present)"
+# The lane may not touch what judges it: the instruments, the pinned standards (check, verify-lib) or the submodule map.
+touched=$(git diff --name-only "$before" "$after") || fail "no commit (git diff $before $after failed)"
+judges=$(printf '%s\n' "$touched" | grep -E -e '^scripts/verify/' -e '^standards(/|$)' -e '^\.gitmodules$' || true)
+judges=$judges$(printf '%s\n' "$touched" | grep -Fx -e "$script" || true)
+[ -z "$judges" ] || { printf '%s\n' "$judges" | head -n 10 >&2; fail "lane changed its own judge"; }
+base_env sh standards/bin/check > .lane-check.log 2>&1 \
+  || { grep -E '^(FAIL|BLOCKED)' .lane-check.log >&2 || true; fail "check failed (see .lane-check.log)"; }
+echo "check: OK"
+# The instrument as it was BEFORE the run: its whole directory from the pre-run commit (so a chained m(N-1).sh found
+# via $(dirname "$0") is the pre-run one too); the scripts cd to the worktree top level themselves.
+judge_dir=$(mktemp -d); trap 'rm -rf "$judge_dir"' EXIT
+git archive --format=tar -o "$judge_dir/judge.tar" "$before" "$(dirname "$script")" && tar -xf "$judge_dir/judge.tar" -C "$judge_dir" \
+  && [ -f "$judge_dir/$script" ] || fail "instrument section failed ($script does not exist at $before)"
+base_env bash "$judge_dir/$script" --section "$section" >> .lane-check.log 2>&1 \
+  || { tail -n 10 .lane-check.log >&2; fail "instrument section failed ($script --section $section; see .lane-check.log)"; }
+echo "dispatch-deepseek: OK — new commit $after, clean tree, check green, $script --section $section green"

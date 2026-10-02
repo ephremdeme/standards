@@ -12,7 +12,7 @@
     ],
     "deny": [
       "Read(./.env)", "Read(./.env.*)", "Read(**/*.pem)", "Read(**/*.key)", "Read(~/.ssh/**)", "Read(~/.config/gh/**)",
-      "Edit(standards/**)", "Write(standards/**)",
+      "Edit(standards/**)", "Edit(**/.env*)",
       "Bash(git push:*)", "Bash(git stash:*)", "Bash(pkill:*)", "Bash(git worktree:*)", "Bash(git reset --hard:*)", "Bash(git submodule:*)", "Bash(rm -rf:*)",
       "Bash(docker:*)", "Bash(curl:*)", "Bash(wget:*)", "Bash(ssh:*)", "Bash(scp:*)", "Bash(gh:*)"
     ]

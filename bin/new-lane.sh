@@ -2,6 +2,9 @@
 # Usage: standards/bin/new-lane.sh <branch> [base]   (run from the primary checkout; coordinator only)
 set -eu
 branch=${1:?branch like opus/lock-timing}; base=${2:-HEAD}
+# Validated before anything else (retro review 17): the name lands in a sed replacement, a path and git arguments.
+case "$branch" in [A-Za-z0-9]*) ;; *) echo "new-lane: invalid branch name '$branch' (must match ^[A-Za-z0-9][A-Za-z0-9_./-]*\$)" >&2; exit 2;; esac
+case "$branch" in *[!A-Za-z0-9_./-]*) echo "new-lane: invalid branch name '$branch' (must match ^[A-Za-z0-9][A-Za-z0-9_./-]*\$)" >&2; exit 2;; esac
 slug=$(printf '%s' "$branch" | tr '/' '-')
 # The primary checkout, even when run from inside a lane worktree (then --show-toplevel would be the lane).
 top=$(cd "$(git rev-parse --path-format=absolute --git-common-dir)/.." && pwd -P); wt="$top/.worktrees/$slug"

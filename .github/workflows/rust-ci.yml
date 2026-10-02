@@ -1,10 +1,11 @@
 # Reusable workflow. Product repos call it with:
-#   jobs: { ci: { uses: <org>/standards/.github/workflows/rust-ci.yml@main } }
+#   jobs: { ci: { uses: <org>/standards/.github/workflows/rust-ci.yml@<STANDARDS_SHA> } }
 name: rust-ci
 on: { workflow_call: {} }
 # Security: least-privilege token; pin every third-party action to a full commit SHA
 # (keep the version in a comment; let Dependabot/Renovate update them). Never use
-# pull_request_target to run PR code. No production secrets in CI.
+# pull_request_target to run PR code. No production secrets in CI. No checkout keeps the
+# repository token (persist-credentials: false): PR code runs after the checkout.
 permissions:
   contents: read
 jobs:
@@ -21,6 +22,7 @@ jobs:
       SQLX_OFFLINE: "true"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with: { persist-credentials: false }
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable branch head 2026-09-30 (no tags published); rust-toolchain.toml pins the compiler
         with: { components: "rustfmt, clippy" }
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -32,19 +34,51 @@ jobs:
       - run: cargo nextest run --workspace
       - run: cargo deny check
       - run: cargo audit
-  secrets:
+  # The frontend gate (retro review 8): the same steps as bin/check's frontend block, from a clean `npm ci`.
+  # hashFiles() is not available in a job-level `if` (no checkout exists there yet), so each step after the checkout
+  # carries the condition; a repository without web/package.json gets a green no-op job.
+  web:
     runs-on: ubuntu-latest
-    # The action lists the pull request's commits through the API: it needs pull-requests: read, and the
-    # calling workflow must grant the same (a called workflow can only narrow the caller's permissions).
-    permissions:
-      contents: read
-      pull-requests: read
+    defaults: { run: { working-directory: web } }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with: { fetch-depth: 0 }
-      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        with: { persist-credentials: false }
+      - if: hashFiles('web/package.json') != ''
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: { node-version: "24" }
+      - if: hashFiles('web/package.json') != ''
+        run: npm ci --no-audit --no-fund
+      - if: hashFiles('web/package.json') != ''
+        run: npx --no-install tsc --noEmit
+      - if: hashFiles('web/package.json') != ''
+        run: npx --no-install biome ci .
+      - if: hashFiles('web/package.json') != ''
+        run: npx --no-install vitest run
+      - if: hashFiles('web/package.json') != ''
+        run: npm audit --audit-level=high
+      - if: hashFiles('web/package.json') != ''
+        run: npm run --silent budget
+  # Secret scan with the pinned gitleaks CLI (retro review 10): no action licence, no secrets, so it also runs on
+  # pull requests from forks. Pull requests: the PR's own commits (base..head); merge_group and push: the last 50.
+  secrets:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with: { fetch-depth: 0, persist-credentials: false }
+      - name: install gitleaks 8.30.1 (pinned release tarball, sha256-verified)
+        run: |
+          set -eu
+          curl -fsSL -o "$RUNNER_TEMP/gitleaks.tar.gz" https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check --strict -
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
+      - name: scan the change's commits
         env:
-          # Required by the action to scan a pull request's commits (the repo-scoped token, read-only here).
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # No PR comments: that would need pull-requests: write; the failing check is the signal.
-          GITLEAKS_ENABLE_COMMENTS: "false"
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          if [ "$EVENT" = pull_request ]; then opts="$BASE..$HEAD"; else opts="-n 50"; fi
+          "$RUNNER_TEMP/gitleaks" git --no-banner --redact --log-opts="$opts" .

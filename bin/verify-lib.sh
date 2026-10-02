@@ -3,7 +3,8 @@
 set -uo pipefail
 export NO_COLOR=1 FORCE_COLOR=0 CI=1   # diagnostics must be plain text for regex checks
 VERIFY_OK=0; VERIFY_FAIL=0
-# Portable lock (flock is missing on macOS): mkdir is atomic everywhere.
+# Portable lock (flock is missing on macOS): mkdir is atomic everywhere. Machine-wide BY DESIGN (docs/07 §4: one full
+# verify chain per machine), hence the fixed path: mkdir refuses an existing one, so it is never reused or deleted.
 VERIFY_LOCK="${TMPDIR:-/tmp}/verify.lock.d"
 if ! mkdir "$VERIFY_LOCK" 2>/dev/null; then echo "verify: another verify chain is running on this machine; wait (stale? rmdir $VERIFY_LOCK)"; exit 3; fi
 trap 'rmdir "$VERIFY_LOCK" 2>/dev/null' EXIT
@@ -25,4 +26,8 @@ expect_out() {
 SECTION_FILTER=""; [ "${1:-}" = "--section" ] && SECTION_FILTER=${2:-}
 section() { [ -z "$SECTION_FILTER" ] || [ "$SECTION_FILTER" = "$1" ]; }
 
-verify_done() { echo "verify:$1 — $VERIFY_OK ok, $VERIFY_FAIL failed"; [ "$VERIFY_FAIL" -eq 0 ]; exit $?; }
+# A run in which no check ran (an unknown --section, a section that forgot its checks) is a failure, never green
+# (retro review 18).
+verify_done() { echo "verify:$1 — $VERIFY_OK ok, $VERIFY_FAIL failed"
+  if [ $((VERIFY_OK + VERIFY_FAIL)) -eq 0 ]; then echo "verify: no checks ran (unknown section?)"; exit 1; fi
+  [ "$VERIFY_FAIL" -eq 0 ]; exit $?; }

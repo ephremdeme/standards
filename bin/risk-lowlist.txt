@@ -1,11 +1,21 @@
 # ALLOWLIST: a change is LOW only if EVERY changed path (added, modified, deleted, renamed-from and renamed-to)
 # matches one of these shell patterns. Anything else — including brand-new files anywhere — is HIGH.
+# classify-risk refuses before this list is read (retro review 3-4, m1.1 O2): any path git has to quote, any mode other
+# than a regular non-executable file (symlinks, executable bits, gitlinks), type changes, admin surfaces (an `admin`
+# segment or an admin.<ext> file, so web/src/components/admin/* and web/src/i18n/keys/admin.json never match) and agent
+# instruction files (CLAUDE.md, CLAUDE.local.md, AGENTS*.md, .claude/, .codex/) wherever they sit.
+# No global *.md: Markdown elsewhere can be an instruction file or a spec the code is judged against.
 docs/*
-*.md
-# Admin surfaces are HIGH wherever they sit: classify-risk refuses any path with an `admin` segment or an admin.<ext>
-# file before this list is read (m1.1 item O2), so web/src/components/admin/* and web/src/i18n/keys/admin.json never
-# match. Player-facing components get their own LOW subtree.
+NOTES.md
+DECISIONS.md
+README.md
+# Player-facing components get their own LOW subtree (founder's rule).
 web/src/components/player/*
 web/src/styles/*
 web/src/i18n/keys/*
-web/public/*
+# Only raster images under web/public: a script there (a service worker, say) runs in every player's browser, and SVG
+# is active content (it can carry script), so it is HIGH too.
+web/public/*.png
+web/public/*.ico
+web/public/*.webp
+web/public/*.jpg

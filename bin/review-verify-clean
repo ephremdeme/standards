@@ -1,6 +1,31 @@
 #!/bin/sh
 # Usage: review-verify-clean <review_dir>  -> fails if the reviewer changed anything (tamper evidence).
-set -u
-cd "$1" || exit 2
-if [ -n "$(git status --porcelain --untracked-files=all | grep -v '^?? .review/')" ]; then echo "REVIEWER MODIFIED FILES:"; git status --porcelain; exit 1; fi
-echo "review checkout clean"
+# Exit 0 + "review checkout clean (HEAD <sha>)" only when: HEAD is still the commit review-checkout recorded in
+# <dir>.head; `git status` (untracked AND ignored files included) succeeds and shows nothing but .review/; no index entry
+# hides edits (skip-worktree / assume-unchanged) and no refs/replace exist; and .review/ still matches the manifest
+# <dir>.review.sha256. Any git error fails closed. Exit 1 = tampering found; exit 2 = not a review checkout (retro review 7).
+set -eu
+refuse() { echo "review-verify-clean: refused — $1" >&2; exit 2; }
+tampered() { echo "REVIEWER MODIFIED FILES: $1"; exit 1; }
+d=${1:?review dir}; d=${d%/}
+[ -d "$d" ] || refuse "$d is not a directory"
+# Absolute from here on: the manifest check below runs after a cd.
+d=$(cd "$d" && pwd -P)
+top=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null) || refuse "$d is not a git repository"
+[ "$(cd "$top" && pwd -P)" = "$d" ] || refuse "$d is not the top of a git checkout"
+[ -f "$d.head" ] && [ -f "$d.review.sha256" ] || refuse "no $d.head / $d.review.sha256 beside $d (not made by review-checkout)"
+want=$(cat "$d.head"); now=$(git -C "$d" rev-parse HEAD) || tampered "git rev-parse HEAD failed"
+[ "$now" = "$want" ] || { echo "REVIEWER MOVED HEAD: $now (the review checkout was $want)"; exit 1; }
+# Capture first, then filter: an empty output from a failing git must never read as clean.
+st=$(git -C "$d" status --porcelain --untracked-files=all --ignored=matching --ignore-submodules=none) || tampered "git status failed"
+changes=$(printf '%s\n' "$st" | grep -v -e '^?? \.review/' -e '^!! \.review/' -e '^$' || true)
+if [ -n "$changes" ]; then echo "REVIEWER MODIFIED FILES:"; printf '%s\n' "$changes"; exit 1; fi
+# Edits git status cannot see: index entries flagged skip-worktree (S) or assume-unchanged (lower case), replace refs.
+tags=$(git -C "$d" ls-files -v) || tampered "git ls-files failed"
+if printf '%s\n' "$tags" | grep -v -e '^H ' -e '^$' | grep -q .; then tampered "hidden edits (skip-worktree or assume-unchanged entries)"; fi
+repl=$(git -C "$d" for-each-ref refs/replace) || tampered "git for-each-ref failed"
+[ -z "$repl" ] || tampered "hidden edits (refs/replace present)"
+listed=$(wc -l < "$d.review.sha256"); present=$(find "$d/.review" ! -type d | wc -l)
+if ! (cd "$d" && sha256sum --check --quiet "$d.review.sha256") >/dev/null 2>&1 || [ "$listed" -ne "$present" ]; then
+  echo "REVIEW MATERIAL CHANGED: .review/ no longer matches $d.review.sha256"; exit 1; fi
+echo "review checkout clean (HEAD $now)"
