@@ -18,4 +18,4 @@ Check in order:
 6. Tests: do they prove behaviour and failure cases? Would they catch a regression?
 7. Design and scope: ADR fit, no needless complexity, no out-of-scope files or dependencies.
 
-Output: the verdict APPROVE / CHANGES REQUIRED / ESCALATE, then one line per finding with severity (blocker/major/minor), confidence (high/medium/low), file:line, the concrete failure path, evidence (a failing test, input, or exact reasoning), minimal fix. Mark REPEAT if seen before. Then a `Could not verify:` list. Nothing else: only this report reaches the coordinator.
+Output: the verdict APPROVE / CHANGES REQUIRED / ESCALATE, then one line per finding with severity (blocker/major/minor), confidence (high/medium/low), file:line, the concrete failure path, evidence (a failing test, input, or exact reasoning), minimal fix. Blockers and majors first: they are what enters the fix round; minors are a short list at the end (the coordinator backlogs them unless they are a few lines). Mark REPEAT if seen before. Then a `Could not verify:` list. Nothing else: only this report reaches the coordinator.
