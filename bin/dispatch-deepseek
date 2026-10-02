@@ -3,7 +3,9 @@
 # Runs a LOW-risk lane headless: Claude Code harness, DeepSeek model. Env vars follow DeepSeek's official guide
 # (api-docs.deepseek.com/quick_start/agent_integrations/claude_code); effort defaults to high (guide uses max).
 # Web tools disabled: lanes need none, and DeepSeek web search adds token cost and injection surface.
-# DeepSeek settings exist ONLY in this process. Never used for HIGH lanes or for repos marked .no-deepseek.
+# DeepSeek settings exist ONLY in this process. HIGH lanes are refused unless DISPATCH_ALLOW_HIGH is exactly 1
+# (founder decision D-073, 2026-10-02: an Opus-written TASK/contract, Opus review mandatory). Absolute refusals, with
+# or without that variable: repos marked .no-deepseek, and a TASK whose §3 owns an admin surface (m1.1 O2).
 # Refusals before dispatch exit 2. After the run the lane is judged on bytes and by judges it could not touch: it must
 # have added commits on its branch, left a clean tree (git errors and hidden index edits fail closed), changed nothing
 # under scripts/verify/, standards or .gitmodules, and then pass `check` and the instrument section named in TASK §5,
@@ -19,13 +21,28 @@ root=$(cd "$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)/.."
 # deleting or replacing the marker inside a lane changes nothing (retro review 12).
 if [ -e "$top/.no-deepseek" ] || git -C "$root" cat-file -e HEAD:.no-deepseek 2>/dev/null || git -C "$wt" cat-file -e HEAD:.no-deepseek 2>/dev/null; then
   echo "dispatch-deepseek: refused — this repo never sends code to DeepSeek" >&2; exit 2; fi
-# Risk comes from the TASK header only: lines 1-3 hold exactly one `Risk: ` line, it reads `Risk: LOW`, and no other
-# line of the TASK starts with `Risk: ` (a `Risk: LOW` further down a HIGH TASK never counts; retro review 12).
+# Risk comes from the TASK header only: lines 1-3 hold exactly one `Risk: ` line, it reads `Risk: LOW` (or exactly
+# `Risk: HIGH` with DISPATCH_ALLOW_HIGH=1, D-073), and no other line of the TASK starts with `Risk: ` (a `Risk: LOW`
+# further down a HIGH TASK never counts; retro review 12).
 task=$wt/TASK.md
 [ -f "$task" ] || { echo "dispatch-deepseek: refused — no TASK.md in $wt" >&2; exit 2; }
 in_header=$(head -n 3 "$task" | grep -c '^Risk: ' || true); in_task=$(grep -c '^Risk: ' "$task" || true)
-if [ "$in_header" != 1 ] || [ "$in_task" != 1 ] || ! head -n 3 "$task" | grep -qx 'Risk: LOW'; then
-  echo "dispatch-deepseek: refused — TASK is not Risk: LOW (the header, lines 1-3, must hold the only Risk: line)" >&2; exit 2; fi
+risk=$(head -n 3 "$task" | sed -n 's/^Risk: //p'); high=0
+if [ "$in_header" != 1 ] || [ "$in_task" != 1 ]; then risk=""; fi
+case "$risk" in
+  LOW) ;;
+  HIGH) if [ "${DISPATCH_ALLOW_HIGH:-}" = 1 ]; then high=1; else risk=""; fi;;
+  *) risk="";;
+esac
+[ -n "$risk" ] || { echo "dispatch-deepseek: refused — TASK is not Risk: LOW (the header, lines 1-3, must hold the only Risk: line; Risk: HIGH needs DISPATCH_ALLOW_HIGH=1, founder decision D-073)" >&2; exit 2; }
+# Admin screens resolve, void and reissue questions: never sent to DeepSeek, whatever the Risk line or the override
+# (m1.1 O2). Judged on TASK §3 (ownership): any path with an `admin` segment or an admin.<ext> file, case-insensitive.
+own=$(awk '/^## /{ s = ($0 ~ /^## 3\./) } s' "$task")
+if printf '%s\n' "$own" | grep -Eqi -e '/admin([^A-Za-z0-9_-]|$)' -e '(^|[^A-Za-z0-9_-])admin(/|\.[A-Za-z0-9])'; then
+  echo "dispatch-deepseek: refused — admin surface in TASK §3 cannot go to DeepSeek even with DISPATCH_ALLOW_HIGH" >&2; exit 2; fi
+# A HIGH TASK without an ownership section cannot be checked for admin paths: refused (fail closed).
+if [ "$high" = 1 ] && [ -z "$own" ]; then
+  echo "dispatch-deepseek: refused — a Risk: HIGH TASK needs a ## 3. ownership section (checked for admin surfaces)" >&2; exit 2; fi
 branch=$(sed -n 's/^Branch: //p' "$task")
 [ "$(git -C "$wt" branch --show-current)" = "$branch" ] || { echo "dispatch-deepseek: branch mismatch" >&2; exit 2; }
 # Headless `claude -p` never shows the trust dialog and ignores a project's permission allow rules until the
@@ -58,6 +75,8 @@ ds_env() { base_env \
   CLAUDE_CODE_AUTO_COMPACT_WINDOW=786432 \
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
   "$@"; }
+# Every refusal has run: a HIGH lane proceeds only now, and says under which decision.
+[ "$high" = 0 ] || echo "dispatch-deepseek: HIGH lane sent to DeepSeek under founder decision D-073 (Opus contract + Opus review mandatory)" >&2
 # Smoke hook: every refusal above has run; stop before anything leaves the machine. Lists the NAMES of the variables
 # claude would receive (the real environment of the real wrapper, never the values).
 if [ "${DISPATCH_DRY_RUN:-0}" = 1 ]; then

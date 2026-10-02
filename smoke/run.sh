@@ -161,6 +161,14 @@ case_ 11 'mkdir -p "NOTES.md docs" && echo x > "NOTES.md docs/run.sh"' HIGH "pat
 case_ 12 'echo x > docs/q\"b.md' HIGH "a path git has to quote (fail closed)" 'a path git had to quote'
 case_ 13 'rm -- "x*"' HIGH "deleted file literally named x* next to x.md"
 case_ 13b 'rm -- "NOTES*"' HIGH "deleted file literally named NOTES* next to NOTES.md (no glob expansion)"
+# The stderr lines are risk-gate's input (it prints them as the HIGH list): exactly one `high: <path>…` line per path.
+git checkout -q -b c14 main; mkdir -p api/src/payouts web/src/components/admin
+echo x > api/src/payouts/mod.rs; echo x > web/src/components/admin/QuestionCard.tsx; git add -A; git commit -qm c14
+got=$($C main HEAD 2>$T/ce); nh=$(grep -c '^high: ' $T/ce)
+if [ "$got" = HIGH ] && grep -q '^high: api/src/payouts/mod\.rs$' $T/ce && grep -q '^high: web/src/components/admin/QuestionCard\.tsx (admin surface)$' $T/ce && [ "$nh" -eq 2 ]; then
+  ok "classify: one high: line per HIGH path on stderr (the gate's input contract)"
+else bad "classify: one high: line per HIGH path on stderr (got $got, $nh high: lines, want HIGH and 2)"; cat $T/ce; fi
+git checkout -q main
 
 # --- 4. risk gate: informational — lists HIGH paths, never blocks (solo developer, 2026-10-02) ---
 G="$T/game/standards/bin/risk-gate"; GH=0123456789abcdef0123456789abcdef01234567
@@ -234,6 +242,20 @@ dd_refused(){ # dd_refused <label> <regex>: a dry run with every other check sat
 dd_refused "dispatch-deepseek: refuses 'Risk: LOW' on line 20 of a HIGH TASK (header only)" 'not Risk: LOW'
 mktask LOW 'scripts/verify/mN.sh --section <lane>'
 dd_refused "dispatch-deepseek: refuses a TASK whose §5 names no instrument section" 'names no instrument section'
+# Founder override D-073 (2026-10-02): a HIGH TASK goes to DeepSeek only with DISPATCH_ALLOW_HIGH=1, never when its
+# §3 owns an admin surface (m1.1 O2). mktaskh <risk> <§3 path> writes a TASK with an ownership section.
+mktaskh(){ printf 'Branch: ds/ui-button\nBase: %s\nRisk: %s\n\n## 2. What this is\nsmoke lane\n\n## 3. Files you own\n- %s\n\n## 5. Verify\n- scripts/verify/m0.sh --section web\n\n## 6. Commit subject\nchore: smoke\n' "$(git rev-parse main)" "$1" "$2" > "$W/TASK.md"; }
+mktaskh HIGH 'web/src/components/player/Btn.tsx'
+dd_refused "dispatch: HIGH TASK refused without the override" 'not Risk: LOW'
+DISPATCH_ALLOW_HIGH=1 HOME=$T/h DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $W" >$T/o 2>&1; rc=$?
+if [ $rc -eq 0 ] && grep -q '^dispatch-deepseek: HIGH lane sent to DeepSeek under founder decision D-073 (Opus contract + Opus review mandatory)$' $T/o && grep -q 'checks passed' $T/o; then
+  ok "dispatch: HIGH TASK accepted with DISPATCH_ALLOW_HIGH=1 (dry run)"
+else bad "dispatch: HIGH TASK accepted with DISPATCH_ALLOW_HIGH=1 (dry run) (rc=$rc, want 0 + the D-073 line)"; tail -n 5 $T/o; fi
+mktaskh HIGH 'web/src/components/admin/QuestionCard.tsx'
+DISPATCH_ALLOW_HIGH=1 HOME=$T/h DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $W" >$T/o 2>&1; rc=$?
+if [ $rc -eq 2 ] && grep -q 'admin surface in TASK §3 cannot go to DeepSeek even with DISPATCH_ALLOW_HIGH' $T/o; then
+  ok "dispatch: HIGH TASK owning an admin path refused even with the override"
+else bad "dispatch: HIGH TASK owning an admin path refused even with the override (rc=$rc, want 2 + /admin surface in TASK §3/)"; tail -n 5 $T/o; fi
 mktask LOW 'scripts/verify/m0.sh --section web'
 # Retro review 13: claude gets an empty environment plus an allowlist; the dry run lists the names (never values).
 LEAK_PROBE=1 HOME=$T/h DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $W" >$T/o 2>&1; rc=$?
