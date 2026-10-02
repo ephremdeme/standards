@@ -4,7 +4,7 @@ Read: the milestone report (docs/md-reports/), specs/milestones/mN.md, the spec 
 
 ## Every milestone
 - [ ] I can say in two sentences what users (or operators) can now do that they couldn't before.
-- [ ] Every acceptance row in mN.md has a green instrument marker, and each guard shows its negative control red.
+- [ ] Every acceptance row in mN.md has a green instrument marker, and each guard shows its negative control red (database guards) or its mutant killed in the report's mutation table (Rust-level guards).
 - [ ] The adjudication tables: rejected findings have a reason I accept; nothing important is marked UNPROVEN or BLOCKED without a plan.
 - [ ] No new foreign service, personal data in logs, or betting-looking copy (domain rules 1, 5, 6).
 - [ ] Decisions the coordinator took this milestone (DECISIONS.md) — I agree, or I add a superseding entry.

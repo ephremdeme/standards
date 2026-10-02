@@ -7,7 +7,10 @@ export NO_COLOR=1 FORCE_COLOR=0 CI=1
 # User-local toolchains (rustup, cargo-installed tools, gitleaks, gh) without touching the caller's shell profile.
 PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"; export PATH
 # sqlx-cli connects even with zero queries, so DATABASE_URL must be set; read the repo's git-ignored .env when it isn't.
-if [ -z "${DATABASE_URL:-}" ] && [ -r .env ]; then set -a; . ./.env; set +a; fi
+# .env is DATA, never code (retro review 1): only DATABASE_URL is taken from it, literally, by bin/read-env.
+if [ -z "${DATABASE_URL:-}" ] && [ -r .env ]; then
+  v=$(sh "$(dirname "$0")/read-env" DATABASE_URL .env) && { DATABASE_URL=$v; export DATABASE_URL; }
+fi
 fail=0
 step() { name=$1; shift; out=$("$@" 2>&1); rc=$?
   if [ $rc -eq 0 ]; then echo "PASS  $name"; else echo "FAIL  $name"; echo "$out" | tail -n 15 | sed 's/^/      /'; fail=1; fi; }
@@ -26,7 +29,8 @@ else echo "SKIP  rust (no Cargo.toml)"; fi
 
 if [ -f web/package.json ]; then
   if need npm "frontend"; then
-    ( cd web && [ -d node_modules ] ) || step "npm ci" sh -c 'cd web && npm ci --no-audit --no-fund'
+    # Always a clean install from the lockfile: a pre-existing node_modules is never trusted (retro review 8).
+    step "npm ci"          sh -c 'cd web && npm ci --no-audit --no-fund'
     step "web typecheck"   sh -c 'cd web && npx --no-install tsc --noEmit'
     step "web lint/format" sh -c 'cd web && npx --no-install biome ci .'
     step "web unit tests"  sh -c 'cd web && npx --no-install vitest run'
@@ -39,9 +43,19 @@ if [ -d .claude/agents ] && [ -d standards/agents ]; then
   step "agent definitions match pinned standards" diff -r standards/agents .claude/agents
 fi
 
+# Uncommitted + untracked content is collected into a file first and every producer's exit status is checked, so a
+# failed collection can never pass as "no secrets"; `--` keeps a file named like an option (--version) from being
+# read as one and swallowing the other files (retro review 15).
+scan_uncommitted() {
+  f=$(mktemp) || return 1
+  if git diff HEAD > "$f" && git ls-files -z --others --exclude-standard > "$f.list" && xargs -0 cat -- /dev/null < "$f.list" >> "$f"; then
+    gitleaks stdin --no-banner --redact < "$f"; rc=$?
+  else echo "could not collect the uncommitted and untracked content"; rc=1; fi
+  rm -f "$f" "$f.list"; return $rc
+}
 if need gitleaks "secret scan"; then
   step "secret scan (committed history)" gitleaks detect --no-banner --redact
-  step "secret scan (uncommitted + untracked)" sh -c '{ git diff HEAD; git ls-files -z --others --exclude-standard | xargs -0 cat /dev/null; } | gitleaks stdin --no-banner --redact'
+  step "secret scan (uncommitted + untracked)" scan_uncommitted
 fi
 
 [ $fail -eq 0 ] && echo "check: OK" || echo "check: FAILED"

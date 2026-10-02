@@ -1,16 +1,53 @@
 #!/bin/sh
-# Usage: classify-risk <base> <head>   (run inside the repo)  -> prints LOW or HIGH, lists HIGH paths
-# Judged on the ACTUAL diff incl. new, deleted and renamed files. Default = HIGH.
-set -u
-base=$1; head=$2; dir=$(dirname "$0"); level=LOW
-paths=$(git diff --name-status --find-renames "$base" "$head" | awk -F'\t' '{for(i=2;i<=NF;i++) print $i}')
-[ -z "$paths" ] && { echo LOW; exit 0; }
-for p in $paths; do
-  ok=0
+# Usage: classify-risk <base> <head>   (run inside the repo)  -> stdout: exactly LOW or HIGH; reasons on stderr
+# Judged on the ACTUAL diff incl. new, deleted, renamed and copied files, their modes and types. Default = HIGH.
+# Fails closed (retro review 2-4): a diff that cannot be computed prints HIGH and exits 1; records are read one by one
+# from `git diff --raw` with tab-separated path fields (no word splitting, no glob expansion: set -f); a path git has
+# to quote, a type change, a symlink, an executable bit, a gitlink or any other non-regular mode is HIGH.
+set -uf
+high() { echo HIGH; echo "classify-risk: $1 — HIGH (fail closed)" >&2; exit 1; }
+[ $# -eq 2 ] || high "usage: classify-risk <base> <head>"
+base=$1; head=$2; list="$(dirname "$0")/risk-lowlist.txt"
+[ -r "$list" ] || high "allowlist $list is unreadable"
+raw=$(mktemp) || high "mktemp failed"
+trap 'rm -f "$raw"' EXIT
+# --ignore-submodules=none: a .gitmodules `ignore = all` must not hide a submodule pointer bump.
+git diff --raw --no-abbrev --no-color --no-ext-diff --ignore-submodules=none --find-renames "$base" "$head" > "$raw" \
+  || high "git diff $base $head failed"
+level=LOW; TAB=$(printf '\t')
+mark() { level=HIGH; echo "high: $1" >&2; }
+judge() { p=$1
+  case "$p" in \"*) mark "$p (a path git had to quote)"; return;; esac
+  # Admin surfaces are HIGH wherever they sit (m1.1 O2): any path segment `admin`, or a file named admin.<ext>,
+  # before the allowlist is consulted — a screen that resolves or voids questions cannot become LOW by placement.
+  case "/$p" in */admin/*|*/admin.*) mark "$p (admin surface)"; return;; esac
+  # Agent instruction files steer every later lane: HIGH wherever they sit, docs/ included (AGENTS*.md covers Codex's
+  # AGENTS.override.md).
+  case "/$p" in */CLAUDE.md|*/CLAUDE.local.md|*/AGENTS*.md|*/.claude/*|*/.codex/*) mark "$p (agent instruction file)"; return;; esac
   while IFS= read -r pat; do
     case "$pat" in ''|'#'*) continue;; esac
-    case "$p" in $pat) ok=1; break;; esac
-  done < "$dir/risk-lowlist.txt"
-  [ $ok -eq 0 ] && { level=HIGH; echo "high: $p" >&2; }
-done
-echo $level
+    case "$p" in $pat) return;; esac
+  done < "$list"
+  mark "$p"
+}
+# A --raw record: ":<srcmode> <dstmode> <srcsha> <dstsha> <status>" TAB <path> [TAB <path>] (rename/copy).
+while IFS= read -r rec; do
+  case "$rec" in :*"$TAB"*) ;; *) mark "unparseable diff record: $rec"; continue;; esac
+  meta=${rec%%"$TAB"*}; paths=${rec#*"$TAB"}
+  set -- $meta
+  [ $# -eq 5 ] || { mark "unparseable diff record: $rec"; continue; }
+  src=${1#:}; dst=$2; st=$5
+  p1=${paths%%"$TAB"*}; p2=""
+  case "$paths" in *"$TAB"*) p2=${paths#*"$TAB"};; esac
+  case "$st" in
+    A|D|M) [ -z "$p2" ] || { mark "unparseable diff record: $rec"; continue; };;
+    R[0-9]*|C[0-9]*) [ -n "$p2" ] || { mark "unparseable diff record: $rec"; continue; };;
+    T*) mark "$p1 (type change)";;
+    *) mark "$p1 (status $st)";;
+  esac
+  for m in "$src" "$dst"; do
+    case "$m" in 000000|100644) ;; *) mark "$p1 (mode $m: only regular non-executable files can be LOW)";; esac
+  done
+  judge "$p1"; [ -z "$p2" ] || judge "$p2"
+done < "$raw"
+echo "$level"
