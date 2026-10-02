@@ -21,7 +21,8 @@ git -C "$top" worktree add -q "$wt" -b "$branch" "$base"
 [ -f "$top/.env.example" ] && [ ! -f "$wt/.env" ] && cp "$top/.env.example" "$wt/.env"
 # The pinned standards come from the primary checkout's own copy (no network, works before the tag is pushed).
 git -C "$wt" -c protocol.file.allow=always -c "submodule.standards.url=$top/standards" submodule update -q --init
-sed -e "s|^Branch: .*|Branch: $branch|" -e "s|^Base: .*|Base: $(git rev-parse "$base")|" \
-  "$top/standards/templates/TASK.template.md" > "$wt/TASK.md"
+# The TASK template comes from the pinned standards; inside the standards repo itself, from its own templates/.
+tpl="$top/standards/templates/TASK.template.md"; [ -f "$tpl" ] || tpl="$top/templates/TASK.template.md"
+sed -e "s|^Branch: .*|Branch: $branch|" -e "s|^Base: .*|Base: $(git rev-parse "$base")|" "$tpl" > "$wt/TASK.md"
 echo "lane:   $wt"; echo "branch: $(git -C "$wt" branch --show-current)"; echo "base:   $(git rev-parse "$base")"
 echo "main:   $(git rev-parse main 2>/dev/null || echo n/a)"
