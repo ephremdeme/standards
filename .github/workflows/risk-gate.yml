@@ -59,5 +59,8 @@ jobs:
           trusted="$GITHUB_WORKSPACE/standards-trusted/bin"
           # classify-risk prints HIGH and exits 1 when the diff cannot be computed: that stays HIGH (fail closed).
           level=$(sh "$trusted/classify-risk" "$BASE" "$HEAD") || level=HIGH
-          gh api --paginate "repos/$REPO/pulls/$PR/reviews" --jq '.' | jq -s 'add' > "$RUNNER_TEMP/reviews.json"
+          # gh's output goes to a file first and its exit status counts (set -e): a failed page can never shrink the
+          # review list that jq then joins (a pipe would report only jq's status).
+          gh api --paginate "repos/$REPO/pulls/$PR/reviews" --jq '.' > "$RUNNER_TEMP/review-pages.json"
+          jq -s 'add' "$RUNNER_TEMP/review-pages.json" > "$RUNNER_TEMP/reviews.json"
           sh "$trusted/risk-gate" "$level" "$HEAD" "$RUNNER_TEMP/reviews.json" "$REQUIRED_APPROVALS" "$FOUNDERS"

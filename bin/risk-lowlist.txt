@@ -3,7 +3,7 @@
 # classify-risk refuses before this list is read (retro review 3-4, m1.1 O2): any path git has to quote, any mode other
 # than a regular non-executable file (symlinks, executable bits, gitlinks), type changes, admin surfaces (an `admin`
 # segment or an admin.<ext> file, so web/src/components/admin/* and web/src/i18n/keys/admin.json never match) and agent
-# instruction files (CLAUDE.md, CLAUDE.local.md, AGENTS.md, .claude/, .codex/) wherever they sit.
+# instruction files (CLAUDE.md, CLAUDE.local.md, AGENTS*.md, .claude/, .codex/) wherever they sit.
 # No global *.md: Markdown elsewhere can be an instruction file or a spec the code is judged against.
 docs/*
 NOTES.md
@@ -13,9 +13,9 @@ README.md
 web/src/components/player/*
 web/src/styles/*
 web/src/i18n/keys/*
-# Only images under web/public: a script there (a service worker, say) runs in every player's browser.
+# Only raster images under web/public: a script there (a service worker, say) runs in every player's browser, and SVG
+# is active content (it can carry script), so it is HIGH too.
 web/public/*.png
-web/public/*.svg
 web/public/*.ico
 web/public/*.webp
 web/public/*.jpg

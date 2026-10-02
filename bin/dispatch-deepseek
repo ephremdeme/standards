@@ -4,8 +4,11 @@
 # (api-docs.deepseek.com/quick_start/agent_integrations/claude_code); effort defaults to high (guide uses max).
 # Web tools disabled: lanes need none, and DeepSeek web search adds token cost and injection surface.
 # DeepSeek settings exist ONLY in this process. Never used for HIGH lanes or for repos marked .no-deepseek.
-# Refusals before dispatch exit 2; a run whose outcome is not a new commit, a clean tree, a green `check` and a green
-# instrument section exits 1 naming the reason (retro review 14).
+# Refusals before dispatch exit 2. After the run the lane is judged on bytes and by judges it could not touch: it must
+# have added commits on its branch, left a clean tree (git errors and hidden index edits fail closed), changed nothing
+# under scripts/verify/, standards or .gitmodules, and then pass `check` and the instrument section named in TASK §5,
+# both read BEFORE the run (the instrument script is taken from the pre-run commit). Otherwise exit 1 naming the
+# reason (retro review 14 and its fix round).
 set -eu
 wt=${1:?absolute worktree path}; effort=${2:-high}
 [ -n "${DS_API_KEY:-}" ] || { echo "dispatch-deepseek: DS_API_KEY not set" >&2; exit 2; }
@@ -75,11 +78,27 @@ after=$(git rev-parse HEAD)
 { [ "$after" != "$before" ] && git merge-base --is-ancestor "$before" "$after" && [ "$(git branch --show-current)" = "$branch" ]; } \
   || fail "no commit (HEAD $after on $(git branch --show-current), expected new commits on $branch after $before)"
 # TASK.md is the coordinator's untracked brief; anything else left uncommitted means the lane did not finish.
-dirty=$(git status --porcelain --untracked-files=all | grep -vx '?? TASK.md' || true)
+# Capture first, then filter: a failing git status must never read as a clean tree.
+st=$(git status --porcelain --untracked-files=all --ignore-submodules=none) || fail "dirty tree (git status failed)"
+dirty=$(printf '%s\n' "$st" | grep -vx -e '?? TASK.md' -e '' || true)
 [ -z "$dirty" ] || { printf '%s\n' "$dirty" | head -n 10 >&2; fail "dirty tree"; }
+tags=$(git ls-files -v) || fail "dirty tree (git ls-files failed)"
+if printf '%s\n' "$tags" | grep -v -e '^H ' -e '^$' | grep -q .; then fail "dirty tree (hidden edits: skip-worktree or assume-unchanged entries)"; fi
+repl=$(git for-each-ref refs/replace) || fail "dirty tree (git for-each-ref failed)"
+[ -z "$repl" ] || fail "dirty tree (hidden edits: refs/replace present)"
+# The lane may not touch what judges it: the instruments, the pinned standards (check, verify-lib) or the submodule map.
+touched=$(git diff --name-only "$before" "$after") || fail "no commit (git diff $before $after failed)"
+judges=$(printf '%s\n' "$touched" | grep -E -e '^scripts/verify/' -e '^standards(/|$)' -e '^\.gitmodules$' || true)
+judges=$judges$(printf '%s\n' "$touched" | grep -Fx -e "$script" || true)
+[ -z "$judges" ] || { printf '%s\n' "$judges" | head -n 10 >&2; fail "lane changed its own judge"; }
 base_env sh standards/bin/check > .lane-check.log 2>&1 \
   || { grep -E '^(FAIL|BLOCKED)' .lane-check.log >&2 || true; fail "check failed (see .lane-check.log)"; }
 echo "check: OK"
-base_env bash "$script" --section "$section" >> .lane-check.log 2>&1 \
+# The instrument as it was BEFORE the run: its whole directory from the pre-run commit (so a chained m(N-1).sh found
+# via $(dirname "$0") is the pre-run one too); the scripts cd to the worktree top level themselves.
+judge_dir=$(mktemp -d); trap 'rm -rf "$judge_dir"' EXIT
+git archive --format=tar -o "$judge_dir/judge.tar" "$before" "$(dirname "$script")" && tar -xf "$judge_dir/judge.tar" -C "$judge_dir" \
+  && [ -f "$judge_dir/$script" ] || fail "instrument section failed ($script does not exist at $before)"
+base_env bash "$judge_dir/$script" --section "$section" >> .lane-check.log 2>&1 \
   || { tail -n 10 .lane-check.log >&2; fail "instrument section failed ($script --section $section; see .lane-check.log)"; }
 echo "dispatch-deepseek: OK — new commit $after, clean tree, check green, $script --section $section green"

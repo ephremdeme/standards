@@ -1,7 +1,7 @@
 #!/bin/sh
 # Usage: read-env <NAME> [file]   (file defaults to ./.env)  -> prints the value of NAME on stdout
 # .env is DATA, never shell code (retro review 1): nothing sources it. The value is taken from the FIRST line that
-# starts with `NAME=`, literally: one pair of surrounding double or single quotes is stripped, nothing else — no
+# starts with `NAME=`, literally: one trailing CR and then one pair of surrounding double or single quotes are stripped, nothing else — no
 # expansion, no escapes, no command substitution. Consumers assign it without eval:
 #   if [ -z "${DATABASE_URL:-}" ]; then v=$(sh standards/bin/read-env DATABASE_URL) && { DATABASE_URL=$v; export DATABASE_URL; }; fi
 # Exit 1 when the file is unreadable or holds no such line; exit 2 when NAME is not a shell identifier.
@@ -12,6 +12,8 @@ case "$name" in ''|[!A-Za-z_]*|*[!A-Za-z0-9_]*) echo "read-env: invalid name '$n
 # awk compares a literal prefix (index), so no character of the value is ever interpreted.
 v=$(awk -v p="$name=" 'index($0, p) == 1 { print substr($0, length(p) + 1); found = 1; exit } END { exit !found }' "$file") \
   || { echo "read-env: no $name= line in $file" >&2; exit 1; }
+# A CRLF file (edited on Windows): one trailing CR goes first, then the quote pair.
+cr=$(printf '\r'); v=${v%"$cr"}
 case "$v" in
   \"*\") v=${v#\"}; v=${v%\"};;
   \'*\') v=${v#\'}; v=${v%\'};;

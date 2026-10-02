@@ -28,6 +28,8 @@ printf 'DATABASE_URL="postgres://q/$USER"\n' > "$P/.env"; chk
 verdict "control: a double-quoted value loses its quotes and nothing else (no \$USER expansion)" 'DBURL=\[postgres://q/\$USER\]'
 printf "DATABASE_URL='postgres://s'\n" > "$P/.env"; chk
 verdict "a single-quoted value loses its quotes" 'DBURL=\[postgres://s\]'
+printf 'DATABASE_URL="postgres://crlf"\r\nOTHER=1\r\n' > "$P/.env"; chk
+verdict "control: a CRLF .env loses the trailing CR, then the quotes" 'DBURL=\[postgres://crlf\]$'
 printf 'DATABASE_URL=postgres://first\nDATABASE_URL=postgres://second\n' > "$P/.env"; chk
 verdict "control: the first DATABASE_URL line wins (no later line overrides it)" 'DBURL=\[postgres://first\]'
 printf 'DATABASE_URL=postgres://file\n' > "$P/.env"; DATABASE_URL=postgres://exported chk

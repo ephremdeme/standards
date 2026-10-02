@@ -60,7 +60,7 @@ perl -pi -e 's/a - b/a + b/' web/src/math.ts; git commit -qam fix
 if command -v gitleaks >/dev/null; then expect_ok "check passes on the fixed frontend (npm ci, typecheck, biome, vitest, audit, budget, gitleaks)" "$T/game/standards/bin/check"; else blk "full check (gitleaks not installed)"; fi
 # Retro review 8: check always runs `npm ci` (a pre-existing node_modules is never trusted). A planted marker is gone.
 touch web/node_modules/.planted; "$T/game/standards/bin/check" >$T/o 2>&1
-grep -q '^PASS  npm ci' $T/o && [ ! -e web/node_modules/.planted ] && ok "check reinstalls node_modules with npm ci even when one exists" || { bad "check trusted a pre-existing node_modules"; tail -n 5 $T/o; }
+grep -q '^PASS  npm ci' $T/o && [ ! -e web/node_modules/.planted ] && ok "check reinstalls node_modules with npm ci even when one exists" || { bad "check reused a pre-existing node_modules"; tail -n 5 $T/o; }
 printf 'token = "ghp_R7mQ2xLk9vTz4NcW8pHs3JdY6bFa1GeU5oKi"\n' > leak.txt
 expect_fail "check fails when an uncommitted secret is added" "$T/game/standards/bin/check" 'FAIL  secret scan \(uncommitted'
 git add leak.txt && git commit -qm leak
@@ -75,16 +75,17 @@ git add -A >/dev/null 2>&1; git commit -qm rust
 # sqlx-cli connects even with zero queries: the sqlx step needs the caller's DATABASE_URL (the instruments export
 # the dev Postgres; CI exports its service). Without one the Rust steps cannot all run and that is reported, never hidden.
 RUST_OK=0
-if ! command -v cargo >/dev/null; then blk "Rust steps of check and the instrument (no cargo on PATH) — install rustup user-locally"
-elif [ -z "${DATABASE_URL:-}" ]; then blk "Rust steps of check (export DATABASE_URL to a reachable Postgres, as scripts/verify/*.sh do)"
+# Labels: only the toolchain case may say "Rust toolchain" (product instruments grep `^BLOCKED Rust toolchain`).
+if ! command -v cargo >/dev/null; then blk "Rust toolchain: no cargo on PATH — install rustup user-locally (the crate steps of check and the instrument cannot run)"
+elif [ -z "${DATABASE_URL:-}" ]; then blk "database steps of check: export DATABASE_URL to a reachable Postgres, as scripts/verify/*.sh do"
 else
-  echo "INFO rust available"
-  if "$T/game/standards/bin/check" > "$T/o" 2>&1 && grep -q "PASS  rust tests" "$T/o" && grep -q "PASS  sqlx check" "$T/o"; then ok "check runs the Rust steps on a real crate (rust steps ran: fmt, clippy, tests, sqlx, deny, audit)"; RUST_OK=1; else bad "rust steps of check"; tail -n 20 "$T/o"; fi
+  echo "INFO cargo available"
+  if "$T/game/standards/bin/check" > "$T/o" 2>&1 && grep -q "PASS  rust tests" "$T/o" && grep -q "PASS  sqlx check" "$T/o"; then ok "check runs the crate steps on a real crate (fmt, clippy, tests, sqlx, deny, audit)"; RUST_OK=1; else bad "crate steps of check"; tail -n 20 "$T/o"; fi
   perl -pi -e 's/a \+ b/a - b/' src/lib.rs; git commit -qam break-rust
   # Red for its own reason: the Rust tests step must be the failing one, not an advisory fetch or anything else.
-  if "$T/game/standards/bin/check" > "$T/o" 2>&1; then bad "check passed with a failing Rust unit test"
-  elif grep -q "FAIL  rust tests" "$T/o"; then ok "check fails when a Rust unit test fails (rust tests step red)"
-  else bad "check failed with a Rust unit test broken, but not on the rust tests step"; tail -n 20 "$T/o"; fi
+  if "$T/game/standards/bin/check" > "$T/o" 2>&1; then bad "check passed with a failing crate unit test"
+  elif grep -q "FAIL  rust tests" "$T/o"; then ok "check fails when a crate unit test fails (its tests step red)"
+  else bad "check failed with a crate unit test broken, but not on its tests step"; tail -n 20 "$T/o"; fi
   git reset -q --hard HEAD~1
 fi
 
@@ -121,7 +122,10 @@ git worktree remove --force "$W"
 
 # --- 3. risk classification on the actual diff --------------------------------------------------
 C="$T/game/standards/bin/classify-risk"
-case_(){ git checkout -q -b "c$1" main 2>/dev/null; sh -c "$2"; git add -A; git commit -qm "c$1"; got=$($C main HEAD 2>/dev/null); [ -z "$got" ] && got="(script error)"; git submodule update -q 2>/dev/null; [ "$got" = "$3" ] && ok "risk: $4 -> $3" || bad "risk: $4 (got $got, want $3)"; git checkout -q main; git submodule update -q; }
+# case_ <id> <change> <LOW|HIGH> <label> [stderr regex]: the optional regex makes a HIGH red for its OWN reason.
+case_(){ git checkout -q -b "c$1" main 2>/dev/null; sh -c "$2"; git add -A; git commit -qm "c$1"; got=$($C main HEAD 2>$T/ce); [ -z "$got" ] && got="(script error)"; git submodule update -q 2>/dev/null
+  if [ "$got" = "$3" ] && { [ -z "${5:-}" ] || grep -Eq -- "$5" $T/ce; }; then ok "risk: $4 -> $3"; else bad "risk: $4 (got $got, want $3${5:+ with stderr /$5/})"; cat $T/ce; fi
+  git checkout -q main; git submodule update -q; }
 git checkout -q main
 case_ 1 'mkdir -p docs && echo x > docs/a.md' LOW "docs only"
 case_ 2 'mkdir -p web/src/components/player && echo x > web/src/components/player/Btn.tsx' LOW "player UI component"
@@ -137,16 +141,18 @@ case_ 7 'mkdir -p web/src/components/player && echo x > web/src/components/playe
 out=$($C DOES_NOT_EXIST HEAD 2>$T/e); rc=$?
 [ "$out" = HIGH ] && [ $rc -eq 1 ] && grep -q 'fail closed' $T/e && ok "risk: a diff that cannot be computed (unknown base) -> HIGH, exit 1" || { bad "risk: failed diff (got '$out' rc=$rc, want HIGH rc=1)"; cat $T/e; }
 mkdir -p docs && echo x > docs/t.md && printf x > 'x*' && echo x > x.md && printf x > 'NOTES*' && echo x > NOTES.md && git add -A && git commit -qm globs
-case_ 8 'echo x >> CLAUDE.md' HIGH "CLAUDE.md edit (no global *.md; instruction files are HIGH)"
-case_ 8b 'mkdir -p docs/sub && echo x > docs/sub/AGENTS.md' HIGH "instruction file nested under docs/"
+case_ 8 'echo x >> CLAUDE.md' HIGH "CLAUDE.md edit (no global *.md; instruction files are HIGH)" 'CLAUDE\.md \(agent instruction file\)'
+case_ 8b 'mkdir -p docs/sub && echo x > docs/sub/AGENTS.md' HIGH "instruction file nested under docs/" 'docs/sub/AGENTS\.md \(agent instruction file\)'
+case_ 8d 'echo x > docs/AGENTS.override.md' HIGH "Codex override instruction file under docs/" 'docs/AGENTS\.override\.md \(agent instruction file\)'
 case_ 8c 'echo y >> NOTES.md' LOW "NOTES.md (listed explicitly)"
-case_ 9 'ln -s ../justfile docs/link.md' HIGH "symlink added under docs/ (mode 120000)"
-case_ 9b 'echo x > docs/run.md && chmod +x docs/run.md' HIGH "executable file added under docs/ (mode 100755)"
-case_ 9c 'rm docs/t.md && ln -s a.md docs/t.md' HIGH "type change file -> symlink under docs/"
+case_ 9 'ln -s ../justfile docs/link.md' HIGH "symlink added under docs/ (mode 120000)" 'mode 120000'
+case_ 9b 'echo x > docs/run.md && chmod +x docs/run.md' HIGH "executable file added under docs/ (mode 100755)" 'mode 100755'
+case_ 9c 'rm docs/t.md && ln -s a.md docs/t.md' HIGH "type change file -> symlink under docs/" 'docs/t\.md \(type change\)'
 case_ 10 'mkdir -p web/public && echo x > web/public/sw.js' HIGH "web/public/sw.js (only images are LOW there)"
 case_ 10b 'mkdir -p web/public && echo x > web/public/logo.png' LOW "image under web/public"
+case_ 10c 'mkdir -p web/public && echo x > web/public/logo.svg' HIGH "SVG under web/public (active content)"
 case_ 11 'mkdir -p "NOTES.md docs" && echo x > "NOTES.md docs/run.sh"' HIGH "path with a space whose halves look LOW"
-case_ 12 'echo x > docs/q\"b.md' HIGH "a path git has to quote (fail closed)"
+case_ 12 'echo x > docs/q\"b.md' HIGH "a path git has to quote (fail closed)" 'a path git had to quote'
 case_ 13 'rm -- "x*"' HIGH "deleted file literally named x* next to x.md"
 case_ 13b 'rm -- "NOTES*"' HIGH "deleted file literally named NOTES* next to NOTES.md (no glob expansion)"
 
@@ -186,6 +192,11 @@ D4=$("$RC" "$T/game" "$BASE" "$HEADSHA" R4) || D4=""; echo '+ looks fine' >> "$D
 expect_fail "an edited .review/diff.patch is detected" "$RV $D4" 'REVIEW MATERIAL CHANGED'
 D5=$("$RC" "$T/game" "$BASE" "$HEADSHA" R5) || D5=""; echo x > "$D5/.env"
 expect_fail "a new git-ignored file in the checkout is detected" "$RV $D5" 'REVIEWER MODIFIED FILES'
+# Fix round: git errors and hidden edits fail closed.
+D6=$("$RC" "$T/game" "$BASE" "$HEADSHA" R6) || D6=""; printf 'garbage' > "$D6/.git/index"
+expect_fail "a corrupt index (git status fails) is never reported clean" "$RV $D6" 'REVIEWER MODIFIED FILES: git status failed'
+D7=$("$RC" "$T/game" "$BASE" "$HEADSHA" R7) || D7=""; git -C "$D7" update-index --skip-worktree web/src/math.ts; echo hidden >> "$D7/web/src/math.ts"
+expect_fail "an edit hidden behind skip-worktree is detected" "$RV $D7" 'REVIEWER MODIFIED FILES: hidden edits'
 mkdir "$T/unrelated"; "$RV" "$T/unrelated" >$T/o 2>&1; rc=$?
 [ $rc -eq 2 ] && grep -q 'review-verify-clean: refused' $T/o && ! grep -q 'review checkout clean' $T/o && ok "an unrelated directory is refused with exit 2, never reported clean" || { bad "unrelated directory (rc=$rc, want 2)"; cat $T/o; }
 # Retro review 16: no rm -rf on a predictable path; the id is validated.
@@ -193,6 +204,7 @@ mkdir "$T/review-R9"; echo keep > "$T/review-R9/keep"; D9=$("$RC" "$T/game" "$BA
 [ -f "$T/review-R9/keep" ] && [ -n "$D9" ] && [ "$D9" != "$T/review-R9" ] && ok "review-checkout never deletes a pre-existing review-<id> path (mktemp -d)" || bad "review-checkout reused or deleted a predictable path ($D9)"
 "$RC" "$T/game" "$BASE" "$HEADSHA" 'x/../y' >$T/o 2>&1; rc=$?
 [ $rc -eq 2 ] && grep -q 'review-checkout: invalid id' $T/o && ok "review-checkout refuses an id outside [A-Za-z0-9_.-] (exit 2)" || { bad "review-checkout id validation (rc=$rc)"; cat $T/o; }
+expect_ok "review-verify-clean accepts a relative path to an untouched checkout" "cd $T && $RV ${D9##*/} | grep -q 'review checkout clean (HEAD $HEADSHA)'"
 for f in reviewer.md reviewer-lite.md; do
   grep -q '^tools: Read, Glob, Grep$' "$H/agents/$f" && ok "$f has read-only tools (no Bash/Edit/Write)" || bad "$f tools not read-only"; done
 
@@ -207,9 +219,9 @@ mktask LOW 'scripts/verify/m0.sh --section web'
 # Workspace trust (m1.1 O3): keyed by the REPOSITORY ROOT in ~/.claude.json; a fake HOME holds the state file.
 mkdir -p "$T/h"; GR=$(cd "$T/game" && pwd -P)
 printf '{"projects":{}}\n' > "$T/h/.claude.json"
-HOME=$T/h DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $W" >$T/o 2>&1; [ $? -eq 2 ] && grep -q "not a trusted" $T/o && ok "dispatch-deepseek: refuses when the repository root is not a trusted workspace" || bad "dispatch-deepseek trust refusal"
+HOME=$T/h DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $W" >$T/o 2>&1; [ $? -eq 2 ] && grep -q "not a trusted" $T/o && ok "dispatch-deepseek: refuses when the repository root has no accepted workspace dialog" || bad "dispatch-deepseek workspace-dialog refusal"
 printf '{"projects":{"%s":{"hasTrustDialogAccepted":true}}}\n' "$GR" > "$T/h/.claude.json"
-HOME=$T/h DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $W" >$T/o 2>&1; [ $? -eq 0 ] && grep -q "checks passed" $T/o && ok "dispatch-deepseek: a lane worktree inherits the trusted repository root (dry run)" || { bad "dispatch-deepseek trust inheritance"; cat $T/o; }
+HOME=$T/h DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $W" >$T/o 2>&1; [ $? -eq 0 ] && grep -q "checks passed" $T/o && ok "dispatch-deepseek: a lane worktree inherits the accepted dialog of its repository root (dry run)" || { bad "dispatch-deepseek workspace-dialog inheritance"; cat $T/o; }
 dd_refused(){ # dd_refused <label> <regex>: a dry run with every other check satisfied must still be refused (exit 2)
   HOME=$T/h DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $W" >$T/o 2>&1; rc=$?
   if [ $rc -eq 2 ] && grep -Eq -- "$2" $T/o; then ok "$1"; else bad "$1 (rc=$rc, want 2 + /$2/)"; tail -n 5 $T/o; fi; }
@@ -240,6 +252,7 @@ SG='git -c user.name=stub -c user.email=stub@t'
 dd_outcome "dispatch-deepseek: a failing claude run is a failure, named" 'exit 1' 1 'claude failed \(rc=1\)'
 dd_outcome "dispatch-deepseek: a run that commits nothing is a failure, named" 'exit 0' 1 'dispatch-deepseek: no commit'
 dd_outcome "dispatch-deepseek: a run that leaves the tree dirty is a failure, named" "$SG commit -q --allow-empty -m stub && echo x > dirty.txt" 1 'dispatch-deepseek: dirty tree'
+dd_outcome "dispatch-deepseek: a run that commits a trivial instrument section is refused, named" "printf 'if section web; then expect_out trivial 0 . -- true; fi\n' >> scripts/verify/m0.sh && $SG commit -qam judge" 1 'dispatch-deepseek: lane changed its own judge'
 dd_outcome "dispatch-deepseek: a commit that breaks check is a failure, named" "perl -pi -e 's/a \\+ b/a - b/' web/src/math.ts && $SG commit -qam break" 1 'dispatch-deepseek: check failed'
 grep -q '^FAIL  web unit tests' "$W/.lane-check.log" && ok "dispatch-deepseek: ... and check failed on the broken unit test (its own reason)" || { bad "dispatch-deepseek check failure was not the broken unit test"; grep -E '^(FAIL|BLOCKED)' "$W/.lane-check.log"; }
 if [ $RUST_OK -eq 1 ]; then
@@ -247,7 +260,7 @@ if [ $RUST_OK -eq 1 ]; then
   dd_outcome "dispatch-deepseek: a green check with a red instrument section is a failure, named" "echo x > stub.md && git add stub.md && $SG commit -qm docs" 1 'dispatch-deepseek: instrument section failed'
   mktask LOW 'scripts/verify/m0.sh --section web'
   dd_outcome "dispatch-deepseek: commit + clean tree + green check + green section -> exit 0" "echo x > stub.md && git add stub.md && $SG commit -qm docs" 0 'dispatch-deepseek: OK'
-else blk "dispatch-deepseek instrument-section outcomes (need the Rust steps of check green: cargo + DATABASE_URL)"; fi
+else blk "dispatch-deepseek instrument-section outcomes: needs the full check green on the smoke crate (cargo + DATABASE_URL)"; fi
 touch .no-deepseek; git add .no-deepseek; git commit -qm nods; git -C "$W" merge -q main 2>/dev/null
 dd_refused "dispatch-deepseek: refuses repos marked .no-deepseek (exchange)" 'never sends code to DeepSeek'
 # Retro review 12: the marker is judged on the PRIMARY checkout's committed tree, not on the lane's files.
@@ -259,6 +272,6 @@ blk "live DeepSeek run (needs DS_API_KEY + claude CLI) — first LOW lane in G0"
 
 # --- 6. needs a real GitHub org --------------------------------------------------------------------
 blk "GitHub rulesets (2 approvals on exchange, stale-approval dismissal, risk-gate as required check) — run the G0 merge-control test PRs in the real org"
-blk "reusable risk-gate and CI workflows (trusted standards checkout, gitleaks CLI, web job) — run on a real PR in the org"
+blk "reusable risk-gate and CI workflows (pinned standards checkout, gitleaks CLI, web job) — run on a real PR in the org"
 blk "OS-level isolation (no Docker socket/credentials in worker containers) — verify on the dev machine"
 echo; [ $R -eq 0 ] && echo "SMOKE: all runnable checks passed" || echo "SMOKE: FAILURES above"; exit $R

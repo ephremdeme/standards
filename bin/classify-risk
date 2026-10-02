@@ -21,8 +21,9 @@ judge() { p=$1
   # Admin surfaces are HIGH wherever they sit (m1.1 O2): any path segment `admin`, or a file named admin.<ext>,
   # before the allowlist is consulted — a screen that resolves or voids questions cannot become LOW by placement.
   case "/$p" in */admin/*|*/admin.*) mark "$p (admin surface)"; return;; esac
-  # Agent instruction files steer every later lane: HIGH wherever they sit, docs/ included.
-  case "/$p" in */CLAUDE.md|*/CLAUDE.local.md|*/AGENTS.md|*/.claude/*|*/.codex/*) mark "$p (agent instruction file)"; return;; esac
+  # Agent instruction files steer every later lane: HIGH wherever they sit, docs/ included (AGENTS*.md covers Codex's
+  # AGENTS.override.md).
+  case "/$p" in */CLAUDE.md|*/CLAUDE.local.md|*/AGENTS*.md|*/.claude/*|*/.codex/*) mark "$p (agent instruction file)"; return;; esac
   while IFS= read -r pat; do
     case "$pat" in ''|'#'*) continue;; esac
     case "$p" in $pat) return;; esac
