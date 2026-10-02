@@ -1,0 +1,63 @@
+# Reusable risk gate (retro review 6). Product repos call it through templates/risk-gate.yml, pinning ONE standards
+# commit SHA twice: in `uses: <org>/standards/.github/workflows/risk-gate.yml@<SHA>` and as `standards_ref: <SHA>`.
+# The classifier and the gate run from that pinned, trusted standards commit, checked out on its own — never from the
+# pull request's `standards` submodule, which the pull request itself could repoint at a classifier that prints LOW.
+name: risk-gate
+on:
+  workflow_call:
+    inputs:
+      standards_ref:
+        description: "full commit SHA of the standards repo; the same SHA as in the caller's uses: line"
+        type: string
+        required: true
+      required_approvals:
+        description: "founder approvals a HIGH change needs on the current head (game 1, exchange 2)"
+        type: string
+        required: true
+      founders:
+        description: "comma-separated GitHub logins of the founders"
+        type: string
+        required: true
+permissions:
+  contents: read
+  pull-requests: read
+jobs:
+  risk-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: standards_ref must be a full commit SHA (a branch or tag can move)
+        env: { REF: "${{ inputs.standards_ref }}" }
+        run: |
+          case "$REF" in *[!0-9a-f]*|'') echo "risk-gate: standards_ref '$REF' is not a commit SHA"; exit 1;; esac
+          [ "${#REF}" -eq 40 ] || { echo "risk-gate: standards_ref '$REF' is not a full 40-character SHA"; exit 1; }
+      - name: trusted standards (pinned commit)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ github.repository_owner }}/standards
+          ref: ${{ inputs.standards_ref }}
+          path: standards-trusted
+          persist-credentials: false
+      - name: the calling repository (its standards submodule is never initialised)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: product
+          fetch-depth: 0
+          submodules: false
+          persist-credentials: false
+      - name: classify and check approvals on the current head
+        working-directory: product
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          PR: ${{ github.event.pull_request.number }}
+          REQUIRED_APPROVALS: ${{ inputs.required_approvals }}
+          FOUNDERS: ${{ inputs.founders }}
+        run: |
+          set -eu
+          trusted="$GITHUB_WORKSPACE/standards-trusted/bin"
+          # classify-risk prints HIGH and exits 1 when the diff cannot be computed: that stays HIGH (fail closed).
+          level=$(sh "$trusted/classify-risk" "$BASE" "$HEAD") || level=HIGH
+          gh api --paginate "repos/$REPO/pulls/$PR/reviews" --jq '.' | jq -s 'add' > "$RUNNER_TEMP/reviews.json"
+          sh "$trusted/risk-gate" "$level" "$HEAD" "$RUNNER_TEMP/reviews.json" "$REQUIRED_APPROVALS" "$FOUNDERS"
