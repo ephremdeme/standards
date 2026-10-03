@@ -15,6 +15,11 @@ T=$(mktemp -d); R=0
 # Every temp file and the verify lock of the throwaway instrument live under $T: the smoke may itself run inside
 # an instrument section that holds ${TMPDIR:-/tmp}/verify.lock.d (m1.1 O7).
 TMPDIR=$T; export TMPDIR
+# The build environment of a caller (an instrument section or with-build-lock exports the product repo's shared
+# CARGO_TARGET_DIR, its BUILD_LOCK_TOKEN and RUSTC_WRAPPER) never reaches the smoke's own builds: they would build into,
+# and re-stamp, the caller's shared target (review round of opus/process-amendments).
+SMOKE_OUTER_TARGET=${CARGO_TARGET_DIR:-}; SMOKE_OUTER_STAMP=$(cat "${SMOKE_OUTER_TARGET:-/nonexistent}/.standards-worktree" 2>/dev/null || echo none)
+unset CARGO_TARGET_DIR BUILD_LOCK_TOKEN RUSTC_WRAPPER
 # The smoke's git identity and settings live in its own throwaway global config: the user's ~/.gitconfig, or whatever
 # GIT_CONFIG_GLOBAL the caller exported, is never written (retro review 16).
 GIT_CONFIG_GLOBAL=$T/gitconfig; export GIT_CONFIG_GLOBAL
@@ -124,6 +129,17 @@ if command -v cargo >/dev/null; then
   (cd "$HB" && "$WBL" cargo test -q) > "$T/o" 2>&1; rc=$?
   if [ $rc -ne 0 ] && grep -q 'hazard-assert' "$T/o"; then ok "guard: with-build-lock cargo test in B is red (B's own test ran after the switch clean)"
   else bad "guard: with-build-lock cargo test in B (rc=$rc, want non-zero + B's assertion 'hazard-assert')"; tail -n 8 "$T/o"; fi
+  # Every profile is cleaned on a switch, not only dev: A's release test binary must not run as B's.
+  if (cd "$HA" && "$WBL" cargo test --release -q) > "$T/o" 2>&1; then ok "shared target: with-build-lock cargo test --release is green in worktree A"; else bad "shared target: release build in A"; tail -n 8 "$T/o"; fi
+  touch -d '2000-01-01 00:00:00' "$HB/src/lib.rs" "$HB/Cargo.toml"
+  (cd "$HB" && "$WBL" cargo test --release -q) > "$T/o" 2>&1; rc=$?
+  if [ $rc -ne 0 ] && grep -q 'hazard-assert' "$T/o"; then ok "guard: with-build-lock cargo test --release in B is red (the release profile was cleaned on the switch)"
+  else bad "guard: with-build-lock cargo test --release in B ran A's release binary (rc=$rc)"; tail -n 8 "$T/o"; fi
+  if [ -n "$SMOKE_OUTER_TARGET" ]; then
+    now=$(cat "$SMOKE_OUTER_TARGET/.standards-worktree" 2>/dev/null || echo none)
+    if [ "$now" = "$SMOKE_OUTER_STAMP" ] && ! ls -d "$SMOKE_OUTER_TARGET"/*/.fingerprint/hz-* >/dev/null 2>&1; then ok "the caller's exported CARGO_TARGET_DIR was neither built into nor re-stamped"
+    else bad "the smoke built into or re-stamped the caller's CARGO_TARGET_DIR ($SMOKE_OUTER_TARGET)"; fi
+  fi
 else blk "shared-target hazard and its guard (needs cargo)"; fi
 
 # --- 2b. instrument (verify-lib) and lane creation ------------------------------------------------

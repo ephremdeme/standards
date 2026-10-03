@@ -103,8 +103,13 @@ build_lock_env() {
   _bl_stamp="$CARGO_TARGET_DIR/.standards-worktree"
   _bl_prev=$(cat "$_bl_stamp" 2>/dev/null) || _bl_prev=""
   [ "$_bl_prev" != "$_bl_top" ] || return 0
-  # A different (or unknown) worktree built last: clean every workspace member before anything builds here.
-  command -v cargo >/dev/null 2>&1 || return 0   # no cargo, nothing can build; the stamp stays as it is
+  # A different (or unknown) worktree built last: clean every workspace member before anything builds here. Cargo is
+  # looked for on PATH, then in $HOME/.cargo/bin (appended, so the caller's own cargo keeps precedence); a cargo the
+  # caller can reach only by an absolute path would otherwise skip the clean — so a missing cargo refuses (fail closed).
+  if ! command -v cargo >/dev/null 2>&1 && [ -x "${HOME:-/nonexistent}/.cargo/bin/cargo" ]; then
+    PATH="$PATH:$HOME/.cargo/bin"; export PATH; fi
+  command -v cargo >/dev/null 2>&1 || {
+    echo "build-lock: cargo is not on PATH or in \$HOME/.cargo/bin, so the previous worktree's workspace crates cannot be cleaned; nothing was built" >&2; return 1; }
   command -v jq >/dev/null 2>&1 || { echo "build-lock: jq is required to list the workspace crates" >&2; _bl_cleanfail; return 1; }
   _bl_meta=$(cd "$_bl_top" && cargo metadata --no-deps --format-version 1 2>/dev/null) || { _bl_cleanfail; return 1; }
   _bl_names=$(printf '%s\n' "$_bl_meta" | jq -r '.packages[].name' 2>/dev/null) || { _bl_cleanfail; return 1; }
@@ -114,7 +119,16 @@ build_lock_env() {
     case "$_bl_n" in ''|-*|*[!A-Za-z0-9_-]*) _bl_cleanfail; return 1;; esac
     set -- "$@" -p "$_bl_n"
   done
+  # `cargo clean -p` cleans one profile directory: dev (debug/) always, then every other profile directory present in
+  # the shared target (release/ -> --release, <name>/ -> --profile <name>; a directory with a .fingerprint/ is a profile).
   (cd "$_bl_top" && cargo clean "$@") >/dev/null 2>&1 || { _bl_cleanfail; return 1; }
+  for _bl_pd in "$CARGO_TARGET_DIR"/*/.fingerprint; do
+    [ -d "$_bl_pd" ] || continue
+    _bl_p=${_bl_pd%/.fingerprint}; _bl_p=${_bl_p##*/}
+    case "$_bl_p" in debug) continue;; ''|-*|*[!A-Za-z0-9_-]*) _bl_cleanfail; return 1;; esac
+    if [ "$_bl_p" = release ]; then (cd "$_bl_top" && cargo clean "$@" --release) >/dev/null 2>&1 || { _bl_cleanfail; return 1; }
+    else (cd "$_bl_top" && cargo clean "$@" --profile "$_bl_p") >/dev/null 2>&1 || { _bl_cleanfail; return 1; }; fi
+  done
   { mkdir -p "$CARGO_TARGET_DIR" && printf '%s\n' "$_bl_top" > "$_bl_stamp"; } 2>/dev/null \
     || { echo "build-lock: could not write $_bl_stamp; nothing was built" >&2; return 1; }
   return 0

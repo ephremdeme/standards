@@ -6,7 +6,8 @@
 # are skipped; a trailing `/` owns the directory and everything below (printed as `<dir>/*`). Bullets, prose,
 # "never touch" lines and blocks outside §3 are never read (NOTES-19 defects 1 and 2).
 # A valid line matches ^[A-Za-z0-9_.*/-]+$, does not start with `/`, has no `..` segment and is not made of `*` and `/`
-# only (a pattern owning the whole repo). Anything else is a refusal, never silently stripped.
+# only (a pattern owning the whole repo) and does not start with `*` (a leading glob segment such as `*.sh` owns files
+# anywhere in the repo). Anything else is a refusal, never silently stripped.
 # Output: the patterns, one per line, exit 0. With --kind: `web` if every pattern starts with web/; `rust` if every
 # pattern is Rust-only (api/, crates/, migrations/, .sqlx/, .cargo/, Cargo.toml, Cargo.lock, rust-toolchain.toml);
 # else `all`. Every refusal: exit 2 with its own message on stderr. Shared by check-scope, task-lint, dispatch-deepseek.
@@ -48,6 +49,7 @@ while IFS= read -r rec; do
   case "$line" in /*) bad=1;; esac
   case "$line" in ..|../*|*/..|*/../*) bad=1;; esac
   case "$line" in *[!*/]*) ;; *) bad=1;; esac
+  case "$line" in \**) bad=1;; esac   # a leading glob segment (*.sh, */src/x) owns files anywhere in the repo
   [ $bad -eq 0 ] || die "invalid owned path on block line $num: $line"
   case "$line" in */) line="${line}*";; esac
   out="$out$line

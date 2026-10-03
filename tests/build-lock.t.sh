@@ -64,6 +64,22 @@ want "control: a failing cargo clean -> exit 1, nothing built" 1 "^build-lock: c
 check_ "control: ... the command did not run" '[ ! -e "$T/built-after-failed-clean" ]'
 check_ "control: ... the stamp still names B" '[ "$(cat "$P/target/shared/.standards-worktree")" = "$B" ]'
 rm -f "$T/clean.rc"
+# Review round: the switch clean covers every profile directory present in the shared target, not only dev (a release
+# binary of A must never run as B's: the game's dev-identity-absent check builds --release).
+mkdir -p "$P/target/shared/debug/.fingerprint" "$P/target/shared/release/.fingerprint" "$P/target/shared/ci/.fingerprint"
+: > "$T/cargo.log"; in_dir "$A" sh "$WBL" cargo build --release > /dev/null 2>&1
+check_ "switch B->A with debug, release and a custom profile present: dev clean" 'grep -qx "cargo clean -p m1 -p m2" "$T/cargo.log"'
+check_ "... --release clean" 'grep -qx "cargo clean -p m1 -p m2 --release" "$T/cargo.log"'
+check_ "... --profile ci clean" 'grep -qx "cargo clean -p m1 -p m2 --profile ci" "$T/cargo.log"'
+check_ "... then the command" '[ "$(tail -n 1 "$T/cargo.log")" = "cargo build --release" ]'
+# Review round: cargo reachable only by an absolute path (not on PATH, not in $HOME/.cargo/bin) must not skip the clean.
+mkdir -p "$T/nohome" "$T/h2/.cargo/bin"; cp "$T/bin/cargo" "$T/h2/.cargo/bin/cargo"
+: > "$T/cargo.log"
+want "control: cargo only by absolute path, stamp differs -> exit 1, nothing built" 1 '^build-lock: cargo is not on PATH or in \$HOME/\.cargo/bin, so the previous worktree.s workspace crates cannot be cleaned; nothing was built$' \
+  env HOME="$T/nohome" PATH=/usr/bin:/bin sh -c 'cd "$1" && sh "$2" "$3/bin/cargo" build' _ "$B" "$WBL" "$T"
+check_ "control: ... the absolute-path cargo did not run" '! grep -q "^cargo build" "$T/cargo.log"'
+want "cargo only in \$HOME/.cargo/bin -> found, the switch clean runs" 0 '' env HOME="$T/h2" PATH=/usr/bin:/bin sh -c 'cd "$1" && sh "$2" "$3/h2/.cargo/bin/cargo" build' _ "$B" "$WBL" "$T"
+check_ "... clean recorded before the command (every profile, then the build)" '[ "$(grep -c "^cargo clean -p m1 -p m2" "$T/cargo.log")" -eq 3 ] && grep -qx "cargo clean -p m1 -p m2 --release" "$T/cargo.log" && [ "$(tail -n 1 "$T/cargo.log")" = "cargo build" ]'
 want "sccache installed -> RUSTC_WRAPPER=sccache" 0 '^W=sccache$' env PATH="$T/sc:$PATH" sh -c 'cd "$1" && sh "$2" sh -c "echo W=\$RUSTC_WRAPPER"' _ "$B" "$WBL"
 want "sccache absent -> one note, no failure" 0 '^build-lock: sccache not installed — no compiler cache$' in_dir "$B" sh "$WBL" true
 want "a caller's RUSTC_WRAPPER and CARGO_TARGET_DIR are kept" 0 "^W=mine T=$T/mytarget\$" env RUSTC_WRAPPER=mine CARGO_TARGET_DIR="$T/mytarget" sh -c 'cd "$1" && sh "$2" sh -c "echo W=\$RUSTC_WRAPPER T=\$CARGO_TARGET_DIR"' _ "$B" "$WBL"

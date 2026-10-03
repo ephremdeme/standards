@@ -51,6 +51,8 @@ inv "a .. segment in the middle" 'docs/../api/x.rs'
 inv "a pattern owning the whole repo" '*'
 inv "a */* pattern owning the whole repo" '*/*'
 inv "a backtick-quoted path" '`docs/a.md`'
+inv "a leading glob segment (*.sh owns every .sh in the repo)" '*.sh'
+inv "a leading glob segment before a directory" '*/src/a.rs'
 want "control: no TASK file -> exit 2" 2 "^owned-paths: no TASK file at $T/missing.md\$" sh "$O" "$T/missing.md"
 want "control: no argument -> usage, exit 2" 2 '^owned-paths: usage: owned-paths \[--kind\] <TASK\.md>$' sh "$O"
 want "control: an unknown option -> usage, exit 2" 2 '^owned-paths: usage: owned-paths \[--kind\] <TASK\.md>$' sh "$O" --kinds "$F"
