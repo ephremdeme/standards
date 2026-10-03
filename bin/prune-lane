@@ -1,0 +1,54 @@
+#!/bin/sh
+# Usage: standards/bin/prune-lane <worktree> <merged-into-ref>    (coordinator, from the primary checkout, after a merge)
+# Removes a merged lane and its artefacts (C5, founder 2026-10-03: "worktrees and their artefacts pruned after merge"):
+# the review checkouts review-checkout made for it (${TMPDIR:-/tmp}/review-<slug>.XXXXXX that have their .head
+# sibling, plus the .head and .review.sha256 siblings), the worktree (`git worktree remove --force`, which also removes
+# its ignored target/ and .env), the branch (`git branch -d`) and stale worktree records (`git worktree prune`).
+# Refusals: exit 2 usage or not a lane worktree of THIS repository (<primary>/.worktrees/<slug>: never the primary
+# checkout, another repository's path or a plain directory); exit 1 the branch is not merged into <ref>, or the lane
+# has uncommitted changes (untracked TASK.md, .lane-run.log and .lane-check.log are allowed). Nothing is removed by
+# rm -rf except a verified review checkout. Every git failure refuses.
+set -u
+usage() { echo "prune-lane: usage: prune-lane <worktree> <merged-into-ref>" >&2; exit 2; }
+[ $# -eq 2 ] || usage
+wt_arg=$1; ref=$2
+case "$ref" in ''|-*) usage;; esac
+# The primary checkout of the repository this is run from.
+common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) && [ -n "$common" ] \
+  && primary=$(cd "$common/.." && pwd -P) || { echo "prune-lane: refused — run it from the primary checkout of the lane's repository" >&2; exit 2; }
+notlane() { echo "prune-lane: refused — $1 is not a lane worktree ($primary/.worktrees/<slug>)" >&2; exit 2; }
+[ -d "$wt_arg" ] || notlane "$wt_arg"
+wt=$(cd "$wt_arg" && pwd -P) || notlane "$wt_arg"
+slug=${wt##*/}
+case "$slug" in ''|.|..|*[!A-Za-z0-9_.-]*) notlane "$wt";; esac
+[ "$wt" = "$primary/.worktrees/$slug" ] || notlane "$wt"
+top=$(git -C "$wt" rev-parse --show-toplevel 2>/dev/null) && [ "$(cd "$top" && pwd -P)" = "$wt" ] || notlane "$wt"
+list=$(git -C "$primary" worktree list --porcelain) || notlane "$wt"
+printf '%s\n' "$list" | grep -Fqx "worktree $wt" || notlane "$wt"
+branch=$(git -C "$wt" branch --show-current 2>/dev/null) && [ -n "$branch" ] || notlane "$wt"
+# Merged: the lane's branch tip is an ancestor of <ref>.
+if ! git -C "$primary" rev-parse -q --verify "$ref^{commit}" >/dev/null 2>&1 \
+   || ! git -C "$primary" merge-base --is-ancestor "refs/heads/$branch" "$ref" 2>/dev/null; then
+  echo "prune-lane: refused — $branch is not merged into $ref" >&2; exit 1; fi
+# Clean: capture first, then filter (a failing git status is never a clean tree).
+st=$(git -C "$wt" status --porcelain --untracked-files=all --ignore-submodules=none) \
+  || { echo "prune-lane: refused — uncommitted changes in $wt: (git status failed)" >&2; exit 1; }
+dirty=$(printf '%s\n' "$st" | grep -vx -e '?? TASK.md' -e '?? .lane-run.log' -e '?? .lane-check.log' -e '' || true)
+if [ -n "$dirty" ]; then first=$(printf '%s\n' "$dirty" | head -n 1); echo "prune-lane: refused — uncommitted changes in $wt: ${first#???}" >&2; exit 1; fi
+kb() { k=$(du -sk "$1" 2>/dev/null | awk 'NR == 1 { print $1 }'); case "$k" in ''|*[!0-9]*) echo 0;; *) echo "$k";; esac; }
+freed=$(kb "$wt"); nrev=0
+# Review checkouts of this lane: review-<slug>.<6 alphanumerics> (mktemp) with the .head sibling review-checkout wrote.
+tmp=${TMPDIR:-/tmp}
+for d in "$tmp"/review-"$slug".*; do
+  [ -d "$d" ] && [ ! -L "$d" ] && [ -f "$d.head" ] || continue
+  rest=${d#"$tmp/review-$slug."}
+  case "$rest" in ??????) ;; *) continue;; esac
+  case "$rest" in *[!A-Za-z0-9]*) continue;; esac
+  freed=$((freed + $(kb "$d")))
+  rm -rf -- "$d" && rm -f -- "$d.head" "$d.review.sha256" || { echo "prune-lane: could not remove the review checkout $d" >&2; exit 1; }
+  nrev=$((nrev + 1))
+done
+git -C "$primary" worktree remove --force "$wt" || { echo "prune-lane: git worktree remove failed for $wt" >&2; exit 1; }
+git -C "$primary" branch -q -d "$branch" || { echo "prune-lane: the worktree is gone but git branch -d $branch failed (merged into $ref, not into the primary's HEAD?)" >&2; exit 1; }
+git -C "$primary" worktree prune || { echo "prune-lane: git worktree prune failed" >&2; exit 1; }
+echo "prune-lane: removed $wt (branch $branch, merged into $ref); review checkouts removed: $nrev; freed $((freed / 1024)) MB"

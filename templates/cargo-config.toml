@@ -1,0 +1,5 @@
+# Copied to <repo>/.cargo/config.toml at the standards pin bump (C5, founder 2026-10-03; docs/07 §2 item 10 "Builds").
+# The shared CARGO_TARGET_DIR and sccache are set at build time by standards/bin/build-lock.sh, not here.
+[build]
+# memory-safe value for the 8 GB / 4-core build box, measured: PENDING (coordinator): peak RSS of a cold cargo build --workspace --all-targets; CI overrides with CARGO_BUILD_JOBS
+jobs = 2

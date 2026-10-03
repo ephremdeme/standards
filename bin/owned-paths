@@ -1,0 +1,70 @@
+#!/bin/sh
+# Usage: owned-paths [--kind] <TASK.md>
+# The paths a lane owns, read from ONE explicit field only (C7, founder 2026-10-03): inside the `## 3.` section (until the
+# next `## ` heading), exactly one fenced block opened by a line that is exactly ```owned and closed by a line that is
+# exactly ```. One repo-relative path or shell `case` pattern per line, read verbatim after trimming spaces; empty lines
+# are skipped; a trailing `/` owns the directory and everything below (printed as `<dir>/*`). Bullets, prose,
+# "never touch" lines and blocks outside §3 are never read (NOTES-19 defects 1 and 2).
+# A valid line matches ^[A-Za-z0-9_.*/-]+$, does not start with `/`, has no `..` segment and is not made of `*` and `/`
+# only (a pattern owning the whole repo) and does not start with `*` (a leading glob segment such as `*.sh` owns files
+# anywhere in the repo). Anything else is a refusal, never silently stripped.
+# Output: the patterns, one per line, exit 0. With --kind: `web` if every pattern starts with web/; `rust` if every
+# pattern is Rust-only (api/, crates/, migrations/, .sqlx/, .cargo/, Cargo.toml, Cargo.lock, rust-toolchain.toml);
+# else `all`. Every refusal: exit 2 with its own message on stderr. Shared by check-scope, task-lint, dispatch-deepseek.
+set -u
+set -f  # patterns are data: never expanded against the current directory
+die() { echo "owned-paths: $1" >&2; exit 2; }
+kind=0
+if [ "${1:-}" = "--kind" ]; then kind=1; shift; fi
+[ $# -eq 1 ] || die "usage: owned-paths [--kind] <TASK.md>"
+case "$1" in -*) die "usage: owned-paths [--kind] <TASK.md>";; esac
+task=$1
+[ -f "$task" ] && [ -r "$task" ] || die "no TASK file at $task"
+# Capture first, then judge the exit code (a failing awk must never read as an empty block).
+# Records: "<block line number><TAB><trimmed line>". awk exit: 3 no block, 4 more than one, 5 not closed.
+tab=$(printf '\t')
+recs=$(awk '
+  /^## / { if (inb) { open = 1; exit } s = ($0 ~ /^## 3\./); next }
+  !s { next }
+  inb && $0 == "```" { inb = 0; next }
+  inb { n++; l = $0; sub(/^[ \t]+/, "", l); sub(/[ \t]+$/, "", l); print n "\t" l; next }
+  $0 == "```owned" { blocks++; if (blocks > 1) { multi = 1; exit } inb = 1; n = 0; next }
+  END { if (multi) exit 4; if (inb || open) exit 5; if (blocks == 0) exit 3; exit 0 }
+' "$task")
+rc=$?
+case $rc in
+  0) ;;
+  3) die 'TASK §3 has no owned-paths block (a line that is exactly three backticks and "owned")';;
+  4) die "TASK §3 has more than one owned-paths block";;
+  5) die "the owned-paths block is not closed";;
+  *) die "could not read $task (awk exit $rc)";;
+esac
+out=""; count=0
+while IFS= read -r rec; do
+  [ -n "$rec" ] || continue
+  num=${rec%%"$tab"*}; line=${rec#*"$tab"}
+  [ -n "$line" ] || continue
+  bad=0
+  case "$line" in *[!A-Za-z0-9_.*/-]*) bad=1;; esac
+  case "$line" in /*) bad=1;; esac
+  case "$line" in ..|../*|*/..|*/../*) bad=1;; esac
+  case "$line" in *[!*/]*) ;; *) bad=1;; esac
+  case "$line" in \**) bad=1;; esac   # a leading glob segment (*.sh, */src/x) owns files anywhere in the repo
+  [ $bad -eq 0 ] || die "invalid owned path on block line $num: $line"
+  case "$line" in */) line="${line}*";; esac
+  out="$out$line
+"; count=$((count + 1))
+done <<EOF
+$recs
+EOF
+[ $count -gt 0 ] || die "the owned-paths block lists no paths"
+if [ $kind -eq 0 ]; then printf '%s' "$out"; exit 0; fi
+web=1; rust=1
+while IFS= read -r p; do
+  [ -n "$p" ] || continue
+  case "$p" in web/*) ;; *) web=0;; esac
+  case "$p" in api/*|crates/*|migrations/*|.sqlx/*|.cargo/*|Cargo.toml|Cargo.lock|rust-toolchain.toml) ;; *) rust=0;; esac
+done <<EOF
+$out
+EOF
+if [ $web -eq 1 ]; then echo web; elif [ $rust -eq 1 ]; then echo rust; else echo all; fi

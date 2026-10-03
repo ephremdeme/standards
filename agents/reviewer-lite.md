@@ -10,4 +10,4 @@ Check: does it do TASK.md; standards/docs/06 "Never" list (floats for money, unw
 
 If the change touches anything HIGH under standards/docs/07 and classify-risk (permissions, personal data, results/points/locks, money, schema, external input, concurrency, config): verdict ESCALATE — it was mis-classified.
 
-Output: APPROVE / CHANGES REQUIRED / ESCALATE, then one line per finding with severity, confidence, file:line, failure path, fix; mark REPEAT; then a `Could not verify:` list. Nothing else: only this report reaches the coordinator.
+Output: APPROVE / CHANGES REQUIRED / ESCALATE, then one line per finding with severity, confidence, file:line, failure path, fix; mark REPEAT. Severity by impact (C3): an untested race or a guard without a test is never minor — major at least. Then a `Could not verify:` list. Nothing else: only this report reaches the coordinator.
