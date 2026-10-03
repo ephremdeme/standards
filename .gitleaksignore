@@ -1,0 +1,3 @@
+# gitleaks fingerprints that are not secrets (commit:path:rule:line).
+# The smoke runner's own fake GitHub token, used to prove the secret scan goes red (smoke/run.sh, 2026-09-30).
+44ebdd5528a9c2b58b70c6e01892d20f4bddad83:smoke/run.sh:github-pat:40
