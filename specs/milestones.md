@@ -16,7 +16,7 @@ Stretch (only if ahead): monthly leagues. January: streak freezes, referral rewa
 |---|---|
 | E0 | Repo, pinned standards, CI + `risk-gate` (informational), money-model spec accepted, invariant/property tests written red, performance targets, independent ledger checker skeleton |
 | E1 | Accounts, available/reserved, simulated deposits/withdrawals, per-market attribution, idempotency with fingerprint, checked math |
-| E2 | Lifecycle, limit orders + max-price guard, reservations, locking order, partial fills, cancel, pair minting, per-market pause |
-| E3 | Resolve YES/NO, fees, self-exclusion; void/refund only after the open void decision |
+| E2 | Lifecycle (open ⇄ paused → closed at `lock_at`), limit orders + max-price guard, reservations (cash and shares), locking order, partial fills, cancel, one YES-priced book with MINT/TRANSFER/BURN fills, self-trade prevention, per-market pause (correctness.md §3 amendment of 2026-10-03) |
+| E3 | Resolve YES/NO → finalized → settled, fees, self-exclusion; **BLOCKED until the §3 open values are decided:** void/refund (void policy), settlement timing (correction window), fee calculation (fee rounding; fees on MINT/BURN/settlement; fees on a voided market) |
 | E4 | Event export, independent checker green on every run, admin/test tool, API docs, market-maker client (caps, kill switch) |
 Pauses if the game slips in late November. Per-operator packaging: future option.
