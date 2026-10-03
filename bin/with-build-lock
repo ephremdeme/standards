@@ -1,0 +1,16 @@
+#!/bin/sh
+# Usage: standards/bin/with-build-lock <command> [args…]      e.g. standards/bin/with-build-lock cargo nextest run -p api
+# Runs one command under the machine build lock with the repo's shared CARGO_TARGET_DIR and sccache when installed
+# (C5; bin/build-lock.sh). Lanes and the coordinator run every cargo command this way. Exits with the command's exit
+# code; 2 = usage or a bad BUILD_LOCK_WAIT; 3 = the lock is held by another process after the wait; 1 = the lock or the
+# shared target could not be set up (nothing ran).
+set -u
+[ $# -ge 1 ] || { echo "with-build-lock: usage: with-build-lock <command> [args…]" >&2; exit 2; }
+BUILD_LOCK_WHO=with-build-lock
+. "$(dirname "$0")/build-lock.sh"
+build_lock_acquire; rc=$?
+if [ $rc -eq 3 ]; then build_lock_refusal; exit 3; fi
+[ $rc -eq 0 ] || exit $rc
+build_lock_env || exit 1
+"$@"; rc=$?
+exit $rc

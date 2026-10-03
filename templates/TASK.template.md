@@ -10,15 +10,17 @@ Risk: <set LOW or HIGH — from classify-risk on expected paths; coordinator may
 ## 2. What this is
 <The behaviour this lane delivers, in plain words. Edge cases and abuse case.>
 
-## 3. Files you own (touch nothing else)
-- <paths>
+## 3. Files you own (touch nothing else; read only from the block below — prohibitions go to §4)
+```owned
+<one repo-relative path or pattern per line; a trailing / owns the directory>
+```
 
 ## 4. Hard rules for this lane
 - <e.g. no new dependencies; uses outbox; lock via DB trigger>
 - Standing rules from past reviews (docs/06 "Never"): take row locks fixture → question, never the reverse; every error path fails closed (a failed command, an empty read or a missing file is a refusal, never a pass); validate every value read from config, env or a request before use; a control is red for its own reason (its own assertion message, not just a failed count); `.env` is data, never sourced; risk is judged by what a path does, never by where it sits.
 
 ## 5. Verify (three cycles: red batch of the new tests, green batch, controls; then once each at the end — report one line per command)
-- standards/bin/check
+- standards/bin/check --only <kind>   (<kind> = `standards/bin/owned-paths --kind TASK.md`: web, rust or all)
 - scripts/verify/mN.sh --section <lane>   (must go green; the coordinator runs every other section at merge)
 - <control test name(s) — database guards only — expected red with this assertion message: "…">
 

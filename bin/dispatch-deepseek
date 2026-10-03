@@ -11,7 +11,14 @@
 # under scripts/verify/, standards or .gitmodules, and then pass `check` and the instrument section named in TASK §5,
 # both read BEFORE the run (the instrument script is taken from the pre-run commit). Otherwise exit 1 naming the
 # reason (retro review 14 and its fix round).
+# C7 (founder 2026-10-03): this script's own copy of task-lint runs right after the Risk check (header, branch, base,
+# the owned-paths block, sections, clean tree, submodule pointer, 15 GB free disk); ownership — and with it the admin
+# refusal (NOTES-19 defect 2) — is read from the TASK's owned-paths block only (bin/owned-paths). C6: the post-run check
+# is `check --only <kind>` (owned-paths --kind). C5: the post-run judgement (check + instrument) runs under the machine
+# build lock this script acquires; BUILD_LOCK_TOKEN reaches the judges only, never claude; the lock is not held while
+# claude runs.
 set -eu
+here=$(cd "$(dirname "$0")" && pwd -P)
 wt=${1:?absolute worktree path}; effort=${2:-high}
 [ -n "${DS_API_KEY:-}" ] || { echo "dispatch-deepseek: DS_API_KEY not set" >&2; exit 2; }
 top=$(git -C "$wt" rev-parse --show-toplevel)
@@ -35,14 +42,17 @@ case "$risk" in
   *) risk="";;
 esac
 [ -n "$risk" ] || { echo "dispatch-deepseek: refused — TASK is not Risk: LOW (the header, lines 1-3, must hold the only Risk: line; Risk: HIGH needs DISPATCH_ALLOW_HIGH=1, founder decision D-073)" >&2; exit 2; }
+# C7: task-lint before every dispatch — this script's own copy, never the lane's. A TASK without a valid owned-paths
+# block (HIGH or LOW) is refused here, so the admin check below always has an ownership to judge.
+sh "$here/task-lint" "$wt" >&2 || { echo "dispatch-deepseek: refused — task-lint failed (see above)" >&2; exit 2; }
 # Admin screens resolve, void and reissue questions: never sent to DeepSeek, whatever the Risk line or the override
-# (m1.1 O2). Judged on TASK §3 (ownership): any path with an `admin` segment or an admin.<ext> file, case-insensitive.
-own=$(awk '/^## /{ s = ($0 ~ /^## 3\./) } s' "$task")
+# (m1.1 O2). Judged on the owned-paths block of TASK §3 only (NOTES-19 defect 2: a "never touch" line is not
+# ownership): any path with an `admin` segment or an admin.<ext> file, case-insensitive.
+own=$(sh "$here/owned-paths" "$task") || { echo "dispatch-deepseek: refused — the owned-paths block of TASK §3 is unreadable" >&2; exit 2; }
 if printf '%s\n' "$own" | grep -Eqi -e '/admin([^A-Za-z0-9_-]|$)' -e '(^|[^A-Za-z0-9_-])admin(/|\.[A-Za-z0-9])'; then
   echo "dispatch-deepseek: refused — admin surface in TASK §3 cannot go to DeepSeek even with DISPATCH_ALLOW_HIGH" >&2; exit 2; fi
-# A HIGH TASK without an ownership section cannot be checked for admin paths: refused (fail closed).
-if [ "$high" = 1 ] && [ -z "$own" ]; then
-  echo "dispatch-deepseek: refused — a Risk: HIGH TASK needs a ## 3. ownership section (checked for admin surfaces)" >&2; exit 2; fi
+# C6: the lane is judged by the checks that match it.
+kind=$(sh "$here/owned-paths" --kind "$task") || { echo "dispatch-deepseek: refused — the owned-paths block of TASK §3 is unreadable" >&2; exit 2; }
 branch=$(sed -n 's/^Branch: //p' "$task")
 [ "$(git -C "$wt" branch --show-current)" = "$branch" ] || { echo "dispatch-deepseek: branch mismatch" >&2; exit 2; }
 # Headless `claude -p` never shows the trust dialog and ignores a project's permission allow rules until the
@@ -83,6 +93,7 @@ if [ "${DISPATCH_DRY_RUN:-0}" = 1 ]; then
   d073
   echo "dispatch-deepseek: environment passed to claude (names only): $(ds_env env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' | sort | tr '\n' ' ')"
   echo "dispatch-deepseek: instrument after the run: $script --section $section"
+  echo "dispatch-deepseek: checks after the run: check --only $kind, $script --section $section"
   echo "dispatch-deepseek: checks passed (dry run, nothing dispatched)"; exit 0
 fi
 brief=$(sed "s|<ABS_WORKTREE>|$wt|g" "$wt/standards/prompts/dispatch-brief.md")
@@ -118,14 +129,20 @@ touched=$(git diff --name-only "$before" "$after") || fail "no commit (git diff 
 judges=$(printf '%s\n' "$touched" | grep -E -e '^scripts/verify/' -e '^standards(/|$)' -e '^\.gitmodules$' || true)
 judges=$judges$(printf '%s\n' "$touched" | grep -Fx -e "$script" || true)
 [ -z "$judges" ] || { printf '%s\n' "$judges" | head -n 10 >&2; fail "lane changed its own judge"; }
-base_env sh standards/bin/check > .lane-check.log 2>&1 \
+# C5: the judgement (check + instrument) holds the machine build lock; the judges re-enter it through BUILD_LOCK_TOKEN,
+# which only they receive (judge_env), never claude.
+BUILD_LOCK_WHO=dispatch-deepseek; . "$here/build-lock.sh"
+blrc=0; build_lock_acquire || blrc=$?
+if [ "$blrc" -ne 0 ]; then [ "$blrc" -ne 3 ] || build_lock_refusal; fail "build lock not acquired (see above)"; fi
+judge_env() { base_env BUILD_LOCK_TOKEN="$BUILD_LOCK_TOKEN" "$@"; }
+judge_env sh standards/bin/check --only "$kind" > .lane-check.log 2>&1 \
   || { grep -E '^(FAIL|BLOCKED)' .lane-check.log >&2 || true; fail "check failed (see .lane-check.log)"; }
 echo "check: OK"
 # The instrument as it was BEFORE the run: its whole directory from the pre-run commit (so a chained m(N-1).sh found
 # via $(dirname "$0") is the pre-run one too); the scripts cd to the worktree top level themselves.
-judge_dir=$(mktemp -d); trap 'rm -rf "$judge_dir"' EXIT
+judge_dir=$(mktemp -d); trap 'rm -rf "$judge_dir"; build_lock_release' EXIT
 git archive --format=tar -o "$judge_dir/judge.tar" "$before" "$(dirname "$script")" && tar -xf "$judge_dir/judge.tar" -C "$judge_dir" \
   && [ -f "$judge_dir/$script" ] || fail "instrument section failed ($script does not exist at $before)"
-base_env bash "$judge_dir/$script" --section "$section" >> .lane-check.log 2>&1 \
+judge_env bash "$judge_dir/$script" --section "$section" >> .lane-check.log 2>&1 \
   || { tail -n 10 .lane-check.log >&2; fail "instrument section failed ($script --section $section; see .lane-check.log)"; }
 echo "dispatch-deepseek: OK — new commit $after, clean tree, check green, $script --section $section green"

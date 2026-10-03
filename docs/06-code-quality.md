@@ -7,7 +7,7 @@
 4. **Honest verification.** Report exactly what ran, output verbatim. A check that could not run is **BLOCKED (reason)**; a claim without evidence is **UNPROVEN**. Never "passed" without output.
 
 ## Done means
-- `standards/bin/check` exits 0 (Rust + web + secrets; missing tool = failure).
+- `standards/bin/check --only <kind>` exits 0 (`<kind>` from `standards/bin/owned-paths --kind TASK.md`; CI runs it without `--only`) (Rust + web + secrets; missing tool = failure).
 - Your section of the milestone instrument (`scripts/verify/mN.sh`) is green, every other section byte-identical (`git diff <base> -- scripts/verify/` empty).
 - Every new guard (constraint, auth check, validation) has a **negative control that was executed red** for its own reason: a database guard gets an `#[ignore]`d control that disables it and asserts the rule anyway; a Rust-level guard is proven by a killed mutant in the coordinator's mutation run at merge (docs/07 §2 item 10).
 - No golden/snapshot file changes without a one-line reason in the commit.

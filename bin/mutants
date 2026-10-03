@@ -1,0 +1,75 @@
+#!/bin/sh
+# Usage: standards/bin/mutants <clone> <base> <crate> [<functions file>]     (coordinator, at every lane merge)
+# Mutation run of C4 (founder 2026-10-03; docs/07 §2 item 10): changed lines PLUS the authorisation and state-transition
+# functions the milestone affects, even if unchanged (the milestone spec's "Mutation functions" list, one regex per
+# line in <functions file>; blank lines skipped). Runs only in a disposable clone (its own .git directory, no remote,
+# clean tree, no other worktree): never in a lane worktree or the primary checkout. Process controls stay on: the
+# machine build lock (bin/build-lock.sh), the wrapper's own green `cargo nextest run -p <crate>` before any
+# --baseline=skip batch, --timeout 180, nextest. Batches (fewest safe): `diff` (--in-diff of git diff <base> HEAD) and,
+# with a functions file, `functions` (one --re per line). Unviable (compile-failing) mutants are never counted as caught:
+# caught / missed / timeout / unviable are reported apart. Exit 0 iff no batch has a missed or timed-out mutant;
+# 1 = red suite, cargo mutants failure, missing outcome files or survivors; 2 = usage or not a disposable clone;
+# 3 = the build lock is held elsewhere after BUILD_LOCK_WAIT.
+set -u
+PATH="$HOME/.cargo/bin:$PATH"; export PATH
+here=$(cd "$(dirname "$0")" && pwd -P) || { echo "mutants: cannot locate its own directory" >&2; exit 2; }
+usage() { echo "mutants: usage: mutants <clone> <base> <crate> [<functions file>]" >&2; exit 2; }
+[ $# -eq 3 ] || [ $# -eq 4 ] || usage
+clone_arg=$1; base=$2; crate=$3; funcs=${4:-}
+case "$crate" in ''|-*|*[!A-Za-z0-9_-]*) usage;; esac
+case "$base" in ''|-*) usage;; esac
+notclone() { echo "mutants: refused — $1 is not a disposable clone (its own .git directory, no remote, clean tree)" >&2; exit 2; }
+[ -d "$clone_arg" ] || notclone "$clone_arg"
+clone=$(cd "$clone_arg" && pwd -P) || notclone "$clone_arg"
+[ -d "$clone/.git" ] && [ ! -L "$clone/.git" ] || notclone "$clone"
+top=$(git -C "$clone" rev-parse --show-toplevel 2>/dev/null) && [ "$(cd "$top" && pwd -P)" = "$clone" ] || notclone "$clone"
+gd=$(git -C "$clone" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) && [ "$(cd "$gd" && pwd -P)" = "$clone/.git" ] || notclone "$clone"
+remotes=$(git -C "$clone" remote) || notclone "$clone"
+[ -z "$remotes" ] || notclone "$clone"
+wts=$(git -C "$clone" worktree list --porcelain) || notclone "$clone"
+[ "$(printf '%s\n' "$wts" | grep -c '^worktree ')" -eq 1 ] || notclone "$clone"
+st=$(git -C "$clone" status --porcelain --untracked-files=all --ignore-submodules=none) || notclone "$clone"
+[ -z "$st" ] || notclone "$clone"
+git -C "$clone" rev-parse -q --verify "$base^{commit}" >/dev/null 2>&1 || usage
+if [ -n "$funcs" ]; then
+  [ -f "$funcs" ] && [ -r "$funcs" ] || usage
+  grep -q '[^[:space:]]' "$funcs" || { echo "mutants: refused — $funcs lists no function regex" >&2; exit 2; }
+fi
+command -v cargo-mutants >/dev/null 2>&1 || { echo "mutants: refused — cargo-mutants is not installed" >&2; exit 2; }
+cd "$clone" || notclone "$clone"
+BUILD_LOCK_WHO=mutants; . "$here/build-lock.sh"
+build_lock_acquire; rc=$?
+if [ $rc -eq 3 ]; then build_lock_refusal; exit 3; fi
+[ $rc -eq 0 ] || exit $rc
+build_lock_env || exit 1
+sha=$(git rev-parse HEAD) || { echo "mutants: git rev-parse HEAD failed in $clone" >&2; exit 1; }
+out=$(mktemp -d "${TMPDIR:-/tmp}/mutants.XXXXXX") || { echo "mutants: mktemp failed" >&2; exit 1; }
+# The baseline is skipped below only because this green run of the same crate in the same clone just passed.
+cargo nextest run -p "$crate" > "$out/baseline.log" 2>&1; rc=$?
+if [ $rc -ne 0 ]; then
+  echo "mutants: refused — the test suite is red at $sha (cargo nextest run -p $crate exit $rc); mutation needs a green run first" >&2; exit 1; fi
+git diff "$base" HEAD > "$out/changes.diff" || { echo "mutants: git diff $base HEAD failed" >&2; exit 1; }
+tc=0; tm=0; tt=0; tu=0; surv=""
+n_of() { n=$(grep -c . "$1" 2>/dev/null); case "$n" in ''|*[!0-9]*) echo "mutants: could not read $1" >&2; exit 1;; esac; echo "$n"; }
+batch() { # batch <name> <extra args…>
+  b=$1; shift
+  cargo mutants --in-place -p "$crate" --baseline=skip --test-tool nextest --timeout 180 -o "$out/$b" "$@" > "$out/$b.log" 2>&1; mrc=$?
+  case $mrc in 0|2|3) ;; *) echo "mutants: cargo mutants failed (rc=$mrc) in the $b batch" >&2; exit 1;; esac
+  o="$out/$b/mutants.out"
+  for k in caught missed timeout unviable; do [ -f "$o/$k.txt" ] || { echo "mutants: no outcome files in $o (cargo mutants did not finish)" >&2; exit 1; }; done
+  c=$(n_of "$o/caught.txt"); m=$(n_of "$o/missed.txt"); t=$(n_of "$o/timeout.txt"); u=$(n_of "$o/unviable.txt")
+  echo "mutants: $b batch — caught $c, missed $m, timeout $t, unviable $u (unviable not counted as caught)"
+  tc=$((tc + c)); tm=$((tm + m)); tt=$((tt + t)); tu=$((tu + u))
+  [ $((m + t)) -eq 0 ] || surv="$surv $o/missed.txt"
+}
+batch diff --in-diff "$out/changes.diff"
+if [ -n "$funcs" ]; then
+  set --
+  while IFS= read -r re || [ -n "$re" ]; do
+    case "$re" in *[![:space:]]*) set -- "$@" --re "$re";; esac
+  done < "$funcs"
+  batch functions "$@"
+fi
+echo "mutants: total — caught $tc, missed $tm, timeout $tt, unviable $tu"
+if [ -n "$surv" ]; then for f in $surv; do echo "mutants: survivors — see $f"; done; exit 1; fi
+exit 0

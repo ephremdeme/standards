@@ -94,6 +94,37 @@ else
   else bad "check failed with a crate unit test broken, but not on its tests step"; tail -n 20 "$T/o"; fi
   git reset -q --hard HEAD~1
 fi
+# C6: lane checks match the lane. `--only web` skips the Rust block and runs the web steps; `--only rust` skips the
+# front end (run with an empty HOME and a PATH without cargo, so nothing is built: the Rust block is BLOCKED there).
+if command -v gitleaks >/dev/null; then
+  expect_ok_out "check --only web: the Rust block is skipped, the web steps run" "$T/game/standards/bin/check --only web" '^SKIP  rust \(--only web\)$' '^PASS  web unit tests$'
+else blk "check --only web (gitleaks not installed)"; fi
+mkdir -p "$T/nohome"; env HOME="$T/nohome" PATH=/usr/bin:/bin "$T/game/standards/bin/check" --only rust > "$T/o" 2>&1; rc=$?
+if [ $rc -eq 1 ] && grep -q '^SKIP  frontend (--only rust)$' "$T/o" && ! grep -q 'web unit tests' "$T/o"; then ok "check --only rust: the front-end block is skipped"
+else bad "check --only rust: the front-end block is skipped (rc=$rc, want 1 + SKIP  frontend (--only rust))"; tail -n 8 "$T/o"; fi
+"$T/game/standards/bin/check" --only bogus > "$T/o" 2>&1; rc=$?
+if [ $rc -eq 2 ] && grep -q '^check: usage: check \[--only rust|web|all\]$' "$T/o"; then ok "control: check --only bogus -> usage, exit 2"
+else bad "control: check --only bogus -> usage, exit 2 (rc=$rc)"; tail -n 4 "$T/o"; fi
+# C5 shared target: cargo keys workspace crates by their path relative to the workspace root and trusts mtimes, so a
+# raw shared CARGO_TARGET_DIR runs another worktree's compiled tests as this one's; with-build-lock cleans the workspace
+# crates when the building worktree changes. Test `t` passes in A and fails in B.
+if command -v cargo >/dev/null; then
+  HZ="$T/hz"; git init -q "$HZ"; mkdir -p "$HZ/src"; printf '.worktrees/\n/target/\n' > "$HZ/.gitignore"
+  printf '[package]\nname = "hz"\nversion = "0.0.0"\nedition = "2021"\npublish = false\n\n[dependencies]\n' > "$HZ/Cargo.toml"
+  printf 'pub fn v() -> i32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        assert_eq!(super::v(), 1, "hazard-assert");\n    }\n}\n' > "$HZ/src/lib.rs"
+  git -C "$HZ" add -A; git -C "$HZ" commit -qm a; HZR=$(cd "$HZ" && pwd -P)
+  git -C "$HZ" worktree add -q "$HZ/.worktrees/a" -b la main; git -C "$HZ" worktree add -q "$HZ/.worktrees/b" -b lb main
+  HA="$HZR/.worktrees/a"; HB="$HZR/.worktrees/b"
+  perl -pi -e 's/^    1$/    2/' "$HB/src/lib.rs"; git -C "$HB" commit -qam b
+  WBL="$T/game/standards/bin/with-build-lock"
+  if (cd "$HA" && "$WBL" cargo test -q) > "$T/o" 2>&1; then ok "shared target: with-build-lock cargo test is green in worktree A"; else bad "shared target: with-build-lock cargo test in A"; tail -n 8 "$T/o"; fi
+  touch -d '2000-01-01 00:00:00' "$HB/src/lib.rs" "$HB/Cargo.toml"
+  if (cd "$HB" && CARGO_TARGET_DIR="$HZR/target/shared" cargo test -q) > "$T/o" 2>&1; then ok "control: a raw shared CARGO_TARGET_DIR runs A's compiled test green for B (the hazard is real)"
+  else bad "control: a raw shared CARGO_TARGET_DIR did not reproduce the hazard (B's own test ran)"; tail -n 8 "$T/o"; fi
+  (cd "$HB" && "$WBL" cargo test -q) > "$T/o" 2>&1; rc=$?
+  if [ $rc -ne 0 ] && grep -q 'hazard-assert' "$T/o"; then ok "guard: with-build-lock cargo test in B is red (B's own test ran after the switch clean)"
+  else bad "guard: with-build-lock cargo test in B (rc=$rc, want non-zero + B's assertion 'hazard-assert')"; tail -n 8 "$T/o"; fi
+else blk "shared-target hazard and its guard (needs cargo)"; fi
 
 # --- 2b. instrument (verify-lib) and lane creation ------------------------------------------------
 mkdir -p scripts/verify
@@ -224,11 +255,22 @@ for f in reviewer.md reviewer-lite.md; do
 
 # --- 5b. DeepSeek dispatch (no network call: dry runs, or a stub `claude` first on PATH) ----------
 DD="$T/game/standards/bin/dispatch-deepseek"
+# Dispatch runs task-lint, whose disk floor (15 GB) reads `df -Pk`: a stub df reporting 100 GB goes first on PATH for
+# every dispatch case; one case puts a 7 GB stub first instead (C5). No bypass variable exists.
+mkdir -p "$T/df100" "$T/df7"
+printf '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/stub 209715200 104857600 104857600 50%% /"\n' > "$T/df100/df"
+printf '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/stub 209715200 202375168 7340032 97%% /"\n' > "$T/df7/df"
+chmod +x "$T/df100/df" "$T/df7/df"; PATH="$T/df100:$PATH"; export PATH
 out=$(standards/bin/new-lane.sh ds/ui-button main); W="$T/game/.worktrees/ds-ui-button"
 ( unset DS_API_KEY; sh -c "$DD $W" ) >$T/o 2>&1; [ $? -eq 2 ] && grep -q "DS_API_KEY not set" $T/o && ok "dispatch-deepseek: refuses without a key" || bad "dispatch-deepseek key check"
 DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $W" >$T/o 2>&1; [ $? -eq 2 ] && grep -q "not Risk: LOW" $T/o && ok "dispatch-deepseek: refuses a lane not marked Risk: LOW" || bad "dispatch-deepseek risk check"
-# The smoke writes the lane's TASK itself: header lines 1-3, and a §5 naming the instrument section.
-mktask(){ printf 'Branch: ds/ui-button\nBase: %s\nRisk: %s\n\n## 2. What this is\nsmoke lane\n\n## 5. Verify\n- %s\n\n## 6. Commit subject\nchore: smoke\n' "$(git rev-parse main)" "$1" "$2" > "$W/TASK.md"; }
+# The smoke writes the lane's TASK itself: header lines 1-3 with a full base sha, headings 1-7, the owned-paths block in
+# §3 and a §5 naming the instrument section (task-lint, C7).
+# mktask <risk> <§5 line> [<owned paths, one per line; NONE = no block; default web/src/components/>] [<extra line, in
+# §3 outside the block and in §4>]
+mktask(){ { printf 'Branch: ds/ui-button\nBase: %s\nRisk: %s\n\n## 1. Read first\n- nothing\n\n## 2. What this is\nsmoke lane\n\n## 3. Files you own\n%s\n' "$(git rev-parse main)" "$1" "${4:-}"
+  if [ "${3:-web/src/components/}" != NONE ]; then printf '```owned\n%s\n```\n' "${3:-web/src/components/}"; fi
+  printf '\n## 4. Hard rules\n- none\n%s\n\n## 5. Verify\n- %s\n\n## 6. Commit subject\nchore: smoke\n\n## 7. Binding facts\n- none\n' "${4:-}" "$2"; } > "$W/TASK.md"; }
 mktask LOW 'scripts/verify/m0.sh --section web'
 # Workspace trust (m1.1 O3): keyed by the REPOSITORY ROOT in ~/.claude.json; a fake HOME holds the state file.
 mkdir -p "$T/h"; GR=$(cd "$T/game" && pwd -P)
@@ -247,8 +289,8 @@ dd_refused "dispatch-deepseek: refuses 'Risk: LOW' on line 20 of a HIGH TASK (he
 mktask LOW 'scripts/verify/mN.sh --section <lane>'
 dd_refused "dispatch-deepseek: refuses a TASK whose §5 names no instrument section" 'names no instrument section'
 # Founder override D-073 (2026-10-02): a HIGH TASK goes to DeepSeek only with DISPATCH_ALLOW_HIGH=1, never when its
-# §3 owns an admin surface (m1.1 O2). mktaskh <risk> <§3 path> writes a TASK with an ownership section.
-mktaskh(){ printf 'Branch: ds/ui-button\nBase: %s\nRisk: %s\n\n## 2. What this is\nsmoke lane\n\n## 3. Files you own\n- %s\n\n## 5. Verify\n- scripts/verify/m0.sh --section web\n\n## 6. Commit subject\nchore: smoke\n' "$(git rev-parse main)" "$1" "$2" > "$W/TASK.md"; }
+# §3 owns an admin surface (m1.1 O2). mktaskh <risk> <§3 path> writes a TASK whose owned-paths block holds that path.
+mktaskh(){ mktask "$1" 'scripts/verify/m0.sh --section web' "$2"; }
 mktaskh HIGH 'web/src/components/player/Btn.tsx'
 dd_refused "dispatch: HIGH TASK refused without the override" 'not Risk: LOW'
 DISPATCH_ALLOW_HIGH=1 HOME=$T/h DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $W" >$T/o 2>&1; rc=$?
@@ -263,8 +305,28 @@ else bad "dispatch: HIGH TASK owning an admin path refused even with the overrid
 dd_refused_env(){ # dd_refused_env <label> <NAME=value> <regex>: like dd_refused with one extra variable set
   env "$2" HOME=$T/h DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $W" >$T/o 2>&1; rc=$?
   if [ $rc -eq 2 ] && grep -Eq -- "$3" $T/o; then ok "$1"; else bad "$1 (rc=$rc, want 2 + /$3/)"; tail -n 5 $T/o; fi; }
-mktask HIGH 'scripts/verify/m0.sh --section web'
-dd_refused_env "dispatch: HIGH TASK without a ## 3. section refused even with the override" DISPATCH_ALLOW_HIGH=1 'needs a ## 3\. ownership section'
+mktask HIGH 'scripts/verify/m0.sh --section web' NONE
+dd_refused_env "dispatch: HIGH TASK without an owned-paths block refused by task-lint even with the override" DISPATCH_ALLOW_HIGH=1 '^task-lint: FAIL owned: TASK §3 has no owned-paths block'
+grep -q '^dispatch-deepseek: refused — task-lint failed (see above)$' $T/o && ok "dispatch: ... with the dispatch refusal line naming task-lint" || { bad "dispatch: task-lint refusal line missing"; tail -n 5 $T/o; }
+# NOTES-19 defect 2: the admin refusal reads the owned-paths block only; a §4 "never touch" line is not ownership.
+mktask LOW 'scripts/verify/m0.sh --section web' 'web/src/components/' '- never touch web/src/admin/'
+HOME=$T/h DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $W" >$T/o 2>&1; rc=$?
+if [ $rc -eq 0 ] && grep -q 'checks passed' $T/o; then ok "dispatch: defect 2: a 'never touch web/src/admin/' line (§3 prose and §4) is not admin ownership (dry run accepted)"
+else bad "dispatch: defect 2: a 'never touch web/src/admin/' line refused the lane (rc=$rc)"; tail -n 5 $T/o; fi
+# C6: the post-run check is scoped by the block's kind (owned-paths --kind).
+dd_kind(){ # dd_kind <owned lines> <kind>
+  mktask LOW 'scripts/verify/m0.sh --section web' "$1"
+  HOME=$T/h DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $W" >$T/o 2>&1; rc=$?
+  if [ $rc -eq 0 ] && grep -q "^dispatch-deepseek: checks after the run: check --only $2, scripts/verify/m0.sh --section web\$" $T/o && grep -q '^dispatch-deepseek: instrument after the run: scripts/verify/m0.sh --section web$' $T/o; then ok "dispatch: a $2 block -> check --only $2 after the run (dry run)"
+  else bad "dispatch: a $2 block -> check --only $2 after the run (rc=$rc)"; tail -n 5 $T/o; fi; }
+dd_kind 'web/src/components/' web
+dd_kind 'api/src/users/' rust
+dd_kind "$(printf 'web/src/components/\napi/src/users/')" all
+# C5 disk floor, enforced by task-lint before every dispatch: a 7 GB stub df refuses the lane.
+mktask LOW 'scripts/verify/m0.sh --section web'
+env PATH="$T/df7:$PATH" HOME=$T/h DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $W" >$T/o 2>&1; rc=$?
+if [ $rc -eq 2 ] && grep -q '^task-lint: FAIL disk: 7.0 GB free on the filesystem of .*, below the 15 GB floor' $T/o && grep -q '^dispatch-deepseek: refused — task-lint failed (see above)$' $T/o; then ok "control: dispatch below the 15 GB disk floor is refused by task-lint (exit 2)"
+else bad "control: dispatch below the 15 GB disk floor (rc=$rc, want 2 + task-lint: FAIL disk)"; tail -n 5 $T/o; fi
 mktaskh HIGH 'web/src/components/player/Btn.tsx'
 dd_refused_env "dispatch: DISPATCH_ALLOW_HIGH=true is not the override (exactly 1)" DISPATCH_ALLOW_HIGH=true 'not Risk: LOW'
 dd_refused_env "dispatch: DISPATCH_ALLOW_HIGH=yes is not the override (exactly 1)" DISPATCH_ALLOW_HIGH=yes 'not Risk: LOW'
@@ -276,6 +338,9 @@ LEAK_PROBE=1 HOME=$T/h DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $W" >$T/o 
 envline=$(grep 'environment passed to claude' $T/o)
 [ $rc -eq 0 ] && printf '%s' "$envline" | grep -qw ANTHROPIC_AUTH_TOKEN && printf '%s' "$envline" | grep -qw HOME && ! printf '%s' "$envline" | grep -qw -e LEAK_PROBE -e DS_API_KEY -e GIT_CONFIG_GLOBAL && ! grep -q dummy $T/o \
   && ok "dispatch-deepseek: an exported LEAK_PROBE (and DS_API_KEY itself) never reaches claude; names listed, values not" || { bad "dispatch-deepseek environment allowlist"; cat $T/o; }
+BUILD_LOCK_TOKEN=probe HOME=$T/h DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $W" >$T/o 2>&1; rc=$?
+[ $rc -eq 0 ] && grep -q 'environment passed to claude' $T/o && ! grep 'environment passed to claude' $T/o | grep -qw BUILD_LOCK_TOKEN \
+  && ok "dispatch-deepseek: BUILD_LOCK_TOKEN goes to the judges only, never to claude (names list unchanged)" || { bad "dispatch-deepseek: BUILD_LOCK_TOKEN in claude's environment"; cat $T/o; }
 # Retro review 14: the run's real outcome decides. A stub `claude` first on PATH stands in for the model.
 mkdir -p "$T/stub"
 for f in .cargo .rustup .npm .local; do [ -e "$REAL_HOME/$f" ] && ln -s "$REAL_HOME/$f" "$T/h/$f"; done

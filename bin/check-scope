@@ -1,22 +1,20 @@
 #!/bin/sh
 # Usage: check-scope <worktree> <base> [head]      (head defaults to HEAD; run by the coordinator, not the lane)
 # Compares the lane's ACTUAL diff (added, modified, deleted, renamed-from and renamed-to paths) against the
-# paths it owns per TASK.md "## 3. Files you own". Exit 0 = every changed path is owned; exit 1 = violation
-# (each offending path printed as "scope violation: <path>"); exit 2 = usage/TASK error (missing TASK.md,
-# no owned paths). TASK.md itself is always allowed (the fix round adds "## Revision" to it).
-# Ownership entries are shell patterns matched against repo-relative paths: "docs/*", "api/src/auth/*",
-# "web/src/i18n/keys/*.json". A trailing "/" means the directory and everything below it.
+# paths it owns per the TASK's owned-paths block in "## 3." (C7): read by bin/owned-paths, never from bullets or prose
+# (NOTES-19 defect 1). Exit 0 = every changed path is owned; exit 1 = violation (each offending path printed as
+# "scope violation: <path>"); exit 2 = usage/TASK error (missing TASK.md, or any owned-paths refusal: no block, two
+# blocks, an unclosed or empty block, an invalid line — its message on stderr). TASK.md itself is always allowed (the
+# fix round adds "## Revision" to it). Ownership entries are shell patterns matched against repo-relative paths:
+# "docs/*", "api/src/auth/*", "web/src/i18n/keys/*.json"; a trailing "/" in the block owns the directory and below.
 set -u
 set -f  # patterns are matched with case, never expanded against the current directory
 wt=${1:?worktree path}; base=${2:?base ref}; head=${3:-HEAD}
 task="$wt/TASK.md"
 [ -f "$task" ] || { echo "check-scope: no TASK.md in $wt" >&2; exit 2; }
-# Owned patterns: bullets under the "## 3." heading until the next "## " heading. A bullet may list several
-# paths separated by commas and may carry a parenthetical note, which is dropped. Placeholders like <paths> are ignored.
-owned=$(awk '/^## 3\./{s=1; next} /^## /{s=0} s && /^- /{sub(/^- +/,""); gsub(/`/,""); print}' "$task" \
-        | sed -e 's/ *([^)]*)//g' -e 's/,/\n/g' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's|/$|/*|' \
-        | grep -v '^<' | grep -v '^$')
-[ -n "$owned" ] || { echo "check-scope: TASK.md §3 lists no owned paths" >&2; exit 2; }
+# Capture first, then judge: any owned-paths failure is a usage error (exit 2), never an empty ownership.
+owned=$(sh "$(dirname "$0")/owned-paths" "$task") || exit 2
+[ -n "$owned" ] || { echo "check-scope: owned-paths printed nothing" >&2; exit 2; }
 # Diff from the merge base, so commits that landed on the base branch after the lane branched are not the lane's.
 mb=$(git -C "$wt" merge-base "$base" "$head") || { echo "check-scope: no merge base between $base and $head" >&2; exit 2; }
 paths=$(git -C "$wt" diff --name-status --find-renames "$mb" "$head" | awk -F'\t' '{for(i=2;i<=NF;i++) print $i}')

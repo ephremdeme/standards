@@ -2,7 +2,17 @@
 # Portable (POSIX sh) full local gate. No pass-result caching (by design; add only after measured need).
 # Artifact caches (sccache, cargo/npm caches) are fine. CI on the integrated change stays authoritative.
 # Exit 0 only if every applicable step passed. Missing tool = BLOCKED = failure (never silently skipped).
+# Usage: check [--only rust|web|all]   (default all). Lane checks match the lane (C6, founder 2026-10-03): a lane runs
+# `--only <kind>` with <kind> from `owned-paths --kind TASK.md`; integrated CI runs check without --only (everything).
+# The secret scans and the agent-definitions step always run. The Rust steps run under the machine build lock with the
+# repo's shared CARGO_TARGET_DIR (C5, bin/build-lock.sh); a lock held elsewhere after BUILD_LOCK_WAIT is BLOCKED rust.
 set -u
+usage() { echo "check: usage: check [--only rust|web|all]" >&2; exit 2; }
+only=all
+if [ $# -gt 0 ]; then
+  [ $# -eq 2 ] && [ "$1" = "--only" ] || usage
+  case "$2" in rust|web|all) only=$2;; *) usage;; esac
+fi
 export NO_COLOR=1 FORCE_COLOR=0 CI=1
 # User-local toolchains (rustup, cargo-installed tools, gitleaks, gh) without touching the caller's shell profile.
 PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"; export PATH
@@ -16,18 +26,29 @@ step() { name=$1; shift; out=$("$@" 2>&1); rc=$?
   if [ $rc -eq 0 ]; then echo "PASS  $name"; else echo "FAIL  $name"; echo "$out" | tail -n 15 | sed 's/^/      /'; fail=1; fi; }
 need() { command -v "$1" >/dev/null 2>&1 || { echo "BLOCKED $2 (missing tool: $1)"; fail=1; return 1; }; }
 
-if [ -f Cargo.toml ]; then
+if [ "$only" = web ]; then echo "SKIP  rust (--only web)"
+elif [ -f Cargo.toml ]; then
   if need cargo "rust"; then
-    step "rust fmt"     cargo fmt --all -- --check
-    step "rust clippy"  cargo clippy --workspace --all-targets --message-format short -- -D warnings
-    if need cargo-nextest "rust tests"; then step "rust tests" cargo nextest run --workspace --failure-output final --status-level fail; fi
-    if need sqlx "sqlx offline check"; then step "sqlx check" cargo sqlx prepare --workspace --check; fi
-    if need cargo-deny "deny"; then step "deps/licences (cargo deny)" cargo deny check; fi
-    if need cargo-audit "audit"; then step "rust advisories (cargo audit)" cargo audit; fi
+    BUILD_LOCK_WHO=check; . "$(dirname "$0")/build-lock.sh"
+    build_lock_acquire; brc=$?
+    if [ $brc -eq 3 ]; then
+      echo "BLOCKED rust (build lock held by $BUILD_LOCK_HOLDER_WHO, pid $BUILD_LOCK_HOLDER_PID, since $BUILD_LOCK_HOLDER_SINCE)"; fail=1
+    elif [ $brc -ne 0 ]; then echo "BLOCKED rust (build lock not acquired, see above)"; fail=1
+    elif ! build_lock_env; then echo "BLOCKED rust (shared target not prepared, see above)"; fail=1; build_lock_release
+    else
+      step "rust fmt"     cargo fmt --all -- --check
+      step "rust clippy"  cargo clippy --workspace --all-targets --message-format short -- -D warnings
+      if need cargo-nextest "rust tests"; then step "rust tests" cargo nextest run --workspace --failure-output final --status-level fail; fi
+      if need sqlx "sqlx offline check"; then step "sqlx check" cargo sqlx prepare --workspace --check; fi
+      if need cargo-deny "deny"; then step "deps/licences (cargo deny)" cargo deny check; fi
+      if need cargo-audit "audit"; then step "rust advisories (cargo audit)" cargo audit; fi
+      build_lock_release
+    fi
   fi
 else echo "SKIP  rust (no Cargo.toml)"; fi
 
-if [ -f web/package.json ]; then
+if [ "$only" = rust ]; then echo "SKIP  frontend (--only rust)"
+elif [ -f web/package.json ]; then
   if need npm "frontend"; then
     # Always a clean install from the lockfile: a pre-existing node_modules is never trusted (retro review 8).
     step "npm ci"          sh -c 'cd web && npm ci --no-audit --no-fund'
