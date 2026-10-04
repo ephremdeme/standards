@@ -19,6 +19,9 @@ jobs:
         options: --health-cmd pg_isready --health-interval 5s --health-retries 10
     env:
       DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      # The application role of callers that separate it from the migration owner (game m2.2): a throwaway CI
+      # credential like the service password above; unused by a caller without scripts/db/app-role.sh.
+      APP_DATABASE_URL: postgres://game_app:game_app@localhost:5432/postgres
       SQLX_OFFLINE: "true"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -44,6 +47,9 @@ jobs:
           for i in $(seq 1 30); do docker exec "$PG_CONTAINER" pg_isready -U postgres && break; sleep 1; done
           docker exec "$PG_CONTAINER" psql -U postgres -X -A -t -v ON_ERROR_STOP=1 -c "SHOW track_commit_timestamp" | grep -qx on
       - run: cargo sqlx migrate run && cargo sqlx prepare --workspace --check
+      - if: hashFiles('scripts/db/app-role.sh') != ''
+        name: application database role (callers that ship scripts/db/app-role.sh)
+        run: bash scripts/db/app-role.sh
       - run: cargo nextest run --workspace
       - run: cargo deny check
       - run: cargo audit

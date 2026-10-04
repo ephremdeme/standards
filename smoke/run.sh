@@ -394,6 +394,18 @@ git worktree remove --force "$W"; git rm -q .no-deepseek; git commit -qm rmnods
 grep -rq 'deepseek' "$H/agents" && bad "agent files reference deepseek" || ok "Claude reviewer agents contain no DeepSeek routing"
 blk "live DeepSeek run (needs DS_API_KEY + claude CLI) — first LOW lane in G0"
 
+# --- 5c. reusable Rust CI: the application role (v0.1.16, game m2.2 A6) -----------------------------
+# A caller that ships scripts/db/app-role.sh gets the role created right after the migrations, before the tests; the
+# job env carries APP_DATABASE_URL beside DATABASE_URL. A static check of the file: the run itself needs a real PR.
+RCI="$H/.github/workflows/rust-ci.yml"
+if grep -q '^      APP_DATABASE_URL: postgres://game_app:game_app@localhost:5432/postgres$' "$RCI" \
+  && grep -A3 -F -- '- run: cargo sqlx migrate run && cargo sqlx prepare --workspace --check' "$RCI" \
+    | grep -A2 -F -- "- if: hashFiles('scripts/db/app-role.sh') != ''" \
+    | grep -A1 '^        name: application database role (callers that ship scripts/db/app-role\.sh)$' \
+    | grep -q '^        run: bash scripts/db/app-role\.sh$'; then
+  ok "rust-ci: APP_DATABASE_URL in the job env and the guarded app-role step directly after the migrations"
+else bad "rust-ci: APP_DATABASE_URL in the job env and the guarded app-role step directly after the migrations (missing in $RCI)"; fi
+
 # --- 6. needs a real GitHub org --------------------------------------------------------------------
 blk "GitHub rulesets — not needed while the founder is the only merger (risk-gate is informational); revisit when a collaborator joins"
 blk "reusable risk-gate and CI workflows (pinned standards checkout, gitleaks CLI, web job) — run on a real PR in the org"
