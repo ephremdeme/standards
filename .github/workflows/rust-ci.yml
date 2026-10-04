@@ -30,6 +30,19 @@ jobs:
         with: { tool: "cargo-nextest,cargo-deny,cargo-audit,sqlx-cli" }
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      # Commit timestamps in the service cluster (exchange D-081, late-fill monitor over pg_xact_commit_timestamp; the
+      # exchange's e2_detective tests assert the setting). A service container takes no command arguments, so the setting
+      # is persisted with ALTER SYSTEM and the container restarted before the schema is migrated. Harmless for a repo that
+      # does not read it. First seen red: exchange run 37219663988 (2026-10-04), whose own `chain` job already did this.
+      - name: track commit timestamps in the service cluster (ALTER SYSTEM + restart)
+        env:
+          PG_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          set -eu
+          docker exec "$PG_CONTAINER" psql -U postgres -X -v ON_ERROR_STOP=1 -c "ALTER SYSTEM SET track_commit_timestamp = on"
+          docker restart "$PG_CONTAINER"
+          for i in $(seq 1 30); do docker exec "$PG_CONTAINER" pg_isready -U postgres && break; sleep 1; done
+          docker exec "$PG_CONTAINER" psql -U postgres -X -A -t -v ON_ERROR_STOP=1 -c "SHOW track_commit_timestamp" | grep -qx on
       - run: cargo sqlx migrate run && cargo sqlx prepare --workspace --check
       - run: cargo nextest run --workspace
       - run: cargo deny check
