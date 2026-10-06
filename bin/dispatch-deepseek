@@ -1,7 +1,8 @@
 #!/bin/sh
-# Usage: standards/bin/dispatch-deepseek <ABS_WORKTREE> [effort: high|max]
+# Usage: standards/bin/dispatch-deepseek <ABS_WORKTREE> [effort: max|high]
 # Runs a lane headless (LOW by default; HIGH only under DISPATCH_ALLOW_HIGH=1, D-073): Claude Code harness, DeepSeek model. Env vars follow DeepSeek's official guide
-# (api-docs.deepseek.com/quick_start/agent_integrations/claude_code); effort defaults to high (guide uses max).
+# (api-docs.deepseek.com/quick_start/agent_integrations/claude_code); effort defaults to max, as the guide does
+# (founder 2026-10-06; high until v0.1.17); pass `high` explicitly for a lighter lane.
 # Web tools disabled: lanes need none, and DeepSeek web search adds token cost and injection surface.
 # DeepSeek settings exist ONLY in this process. HIGH lanes are refused unless DISPATCH_ALLOW_HIGH is exactly 1
 # (founder decision D-073, 2026-10-02: an Opus-written TASK/contract, Opus review mandatory). Absolute refusals, with
@@ -19,7 +20,8 @@
 # claude runs.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd -P)
-wt=${1:?absolute worktree path}; effort=${2:-high}
+wt=${1:?absolute worktree path}; effort=${2:-max}
+case "$effort" in max|high) ;; *) echo "dispatch-deepseek: effort must be max or high, not '$effort'" >&2; exit 2;; esac
 [ -n "${DS_API_KEY:-}" ] || { echo "dispatch-deepseek: DS_API_KEY not set" >&2; exit 2; }
 top=$(git -C "$wt" rev-parse --show-toplevel)
 # The primary checkout (a lane worktree shares its object store and inherits its workspace trust).
