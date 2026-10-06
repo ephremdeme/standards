@@ -1,0 +1,284 @@
+#!/bin/sh
+# Usage: standards/bin/merge-pr <owner/repo> <pr> <full-head-sha> [--smoke-log <path>] [--milestone <mN> [--residual D-NNN]]
+# The integrator's only merge path (exchange D-086; D-088 item 7 is its milestone checklist). Merges PR <pr> into main
+# with `gh pr merge <pr> --repo <r> --merge --match-head-commit <sha>`, so GitHub refuses if the head moved after the
+# checks below. Every fact is read from GitHub at the exact SHA (no local checkout is trusted). Refused (exit 2,
+# "merge-pr: refused — <reason>") unless ALL hold:
+#  1. <full-head-sha> is 40 lowercase hex; <owner/repo> is ephremdeme/{exchange,standards,game} (ephremdeme/hub has no
+#     CI and is refused); <pr> is a number.
+#  2. gh pr view: state OPEN, not a draft, not from another repository (isCrossRepository), headRefOid = <sha>,
+#     baseRefName = main. A head branch integration/<mN> requires --milestone <mN>; --milestone requires that branch.
+#  3. Check runs on that exact SHA (gh api --paginate .../commits/<sha>/check-runs; every page read, the count equal to
+#     total_count): at least one, every one completed. Pinned names must be present and concluded success (skipped or
+#     neutral is not enough): exchange "rust / check", "rust / secrets", "rust / web" and >= 1 "chain (<group>)" (every
+#     chain (*) run success); game the three rust ones. Every other run: success, skipped or neutral. The legacy
+#     combined status (.../commits/<sha>/status) is success or has no statuses (total_count 0).
+#     ephremdeme/standards has no PR CI: there --smoke-log <path> replaces the check runs: >= 1 line starting PASS,
+#     none starting FAIL, and smoke-head lines that all read "smoke-head: <sha>" (at least one). The integrator runs the
+#     smoke on that head and appends the line itself (printf 'smoke-head: %s\n' "$(git rev-parse HEAD)" >> log): this
+#     evidence is integrator-attested, bound to the SHA, not independent.
+#  4. The label founder-approved is required for a milestone PR (head integration/*) and for any PR whose files
+#     (gh api --paginate .../pulls/<pr>/files, as many as changedFiles) include .github/**, .claude/** or a CODEOWNERS
+#     file (also as a rename's previous name). Label timing: the newest entry of the branch's activity
+#     (gh api ".../activity?ref=refs/heads/<branch>") must be a push whose after = <sha>; the label's latest "labeled"
+#     event by the User ephremdeme (bots excluded) must be later than that push, with no "unlabeled" event since.
+#     ASSUMPTION: the agent and the founder share the login ephremdeme, so this cannot tell them apart; the founder's
+#     settings deny agents `gh pr edit`, `gh pr review`, `gh pr comment`, `gh label` and raw `gh api` writes, so only
+#     the founder applies labels. This script never writes to GitHub except the merge itself.
+#  5. --milestone <mN> (D-088 item 7):
+#     a. a nightly.yml run whose head_sha = <sha> has job(s) named chain, every one completed with success;
+#     b. docs/md-reports/<mN>-milestone-review.md at <sha> (contents API, base64) carries "codex-last-read: <X>" (one
+#        value, 40 hex) where X = <sha>, or GitHub's compare X...<sha> is "ahead" and lists only that review file (a
+#        commit cannot contain its own SHA, so the commit recording Codex's review is the one change allowed after X);
+#        300 or more listed files are treated as truncated;
+#     c. founder-approved as in 4;
+#     d. the human gate: --residual D-NNN with a line starting "- D-NNN |" in DECISIONS.md at <sha> (contents API), or
+#        else the label human-gate-accepted under the timing rule of 4.
+# Every gh or jq failure, an empty reply and a reply without the expected fields refuse (fail closed); jq and base64
+# required. GIT_NO_REPLACE_OBJECTS=1 is exported although no local git object is read.
+# Exit 1: gh pr merge itself failed after every check passed (gh's message named). Exit 0: one line
+# "merge-pr: OK <r>#<pr> <sha> merged" (with " milestone <mN>" when given).
+set -u
+LC_ALL=C; export LC_ALL
+GIT_NO_REPLACE_OBJECTS=1; export GIT_NO_REPLACE_OBJECTS
+unset GH_HOST GH_REPO
+GH_PROMPT_DISABLED=1; export GH_PROMPT_DISABLED
+refuse() { echo "merge-pr: refused — $1" >&2; exit 2; }
+usage() { echo "merge-pr: usage: merge-pr <owner/repo> <pr> <full-head-sha> [--smoke-log <path>] [--milestone <mN> [--residual D-NNN]]" >&2; exit 2; }
+[ $# -ge 3 ] || usage
+r=$1; pr=$2; sha=$3; shift 3
+ms=; ms_set=0; smoke=; smoke_set=0; resid=; resid_set=0
+while [ $# -gt 0 ]; do
+  case $1 in
+    --milestone) [ $# -ge 2 ] && [ $ms_set -eq 0 ] || usage; ms=$2; ms_set=1; shift 2;;
+    --smoke-log) [ $# -ge 2 ] && [ $smoke_set -eq 0 ] || usage; smoke=$2; smoke_set=1; shift 2;;
+    --residual) [ $# -ge 2 ] && [ $resid_set -eq 0 ] || usage; resid=$2; resid_set=1; shift 2;;
+    *) usage;;
+  esac
+done
+# 1. Arguments.
+case "$sha" in *[!0-9a-f]*|'') refuse "$sha is not a full 40-character lowercase hex SHA";; esac
+[ ${#sha} -eq 40 ] || refuse "$sha is not a full 40-character lowercase hex SHA"
+[ "$r" != ephremdeme/hub ] || refuse "ephremdeme/hub has no CI; merge-pr does not merge its PRs"
+case "$r" in ephremdeme/exchange|ephremdeme/standards|ephremdeme/game) ;; *) refuse "$r is not ephremdeme/{exchange,standards,game}";; esac
+case "$pr" in ''|0*|*[!0-9]*) refuse "$pr is not a PR number";; esac
+[ $resid_set -eq 0 ] || [ $ms_set -eq 1 ] || refuse "--residual applies to milestone PRs only"
+[ $smoke_set -eq 0 ] || [ "$r" = ephremdeme/standards ] || refuse "--smoke-log applies to ephremdeme/standards only"
+if [ $ms_set -eq 1 ]; then
+  case "$ms" in [a-z]*[0-9]*) ;; *) refuse "$ms is not a milestone id";; esac
+  case "$ms" in *[!a-z0-9.]*|*.|*..*) refuse "$ms is not a milestone id";; esac
+fi
+if [ $resid_set -eq 1 ]; then
+  n=${resid#D-}
+  case "$resid" in D-*) ;; *) n=x;; esac
+  case "$n" in [0-9][0-9][0-9]*) ;; *) n=x;; esac
+  case "$n" in *[!0-9]*) refuse "$resid is not a decision id (D-NNN)";; esac
+fi
+command -v jq >/dev/null 2>&1 || refuse "jq is required"
+command -v gh >/dev/null 2>&1 || refuse "gh is required"
+command -v base64 >/dev/null 2>&1 || refuse "base64 is required"
+tmp=$(mktemp -d) || refuse "mktemp failed"
+trap 'rm -rf "$tmp"' EXIT
+trap 'exit 2' HUP INT TERM
+gh_read() { # gh_read <what> <outfile> <gh args...>: gh's stdout into <outfile>; refuses when gh fails
+  what=$1; of=$2; shift 2
+  gh "$@" >"$of" 2>"$tmp/err"; gr=$?
+  [ $gr -eq 0 ] || refuse "$what failed: $(head -n 1 "$tmp/err" | grep . || echo "exit $gr")"
+}
+# Paginated object replies: one object per page, each with total_count and an array <key>; the pages together must
+# hold exactly total_count items. Yields {err} or {items}. ts: an ISO 8601 stamp (Z or +hh:mm, optional fraction) as
+# epoch seconds; anything else is an error (fail closed).
+DEFS='def pages($k): if length == 0 or any(.[]; type != "object" or (.[$k] | type) != "array" or (.total_count | type) != "number") then {err: "unreadable JSON"} else .[0].total_count as $n | [.[] | .[$k][]] as $i | if any(.[]; .total_count != $n) or ($i | length) != $n then {err: "incomplete (\($i | length) of \($n) read)"} else {items: $i} end end;
+def ts: if type != "string" then error("date") else
+  (capture("^(?<d>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(\\.[0-9]+)?(?<z>Z|[+-][0-9]{2}:[0-9]{2})$") // error("date")) as $m
+  | (($m.d + "Z") | fromdateiso8601) - (if $m.z == "Z" then 0 else ((($m.z[1:3] | tonumber) * 3600 + ($m.z[4:6] | tonumber) * 60) * (if $m.z[0:1] == "+" then 1 else -1 end)) end) end;
+'
+# 2. The PR.
+gh_read "gh pr view" "$tmp/pr.json" pr view "$pr" --repo "$r" --json state,isDraft,headRefOid,baseRefName,headRefName,isCrossRepository,changedFiles,labels
+pv=$(jq -r 'if type == "object" and (.state | type) == "string" and (.isDraft | type) == "boolean" and (.headRefOid | type) == "string" and (.baseRefName | type) == "string" and (.headRefName | type) == "string" and (.isCrossRepository | type) == "boolean" and (.changedFiles | type) == "number" and (.labels | type) == "array" and all(.labels[]; (.name | type) == "string") then "ok" else "bad" end' "$tmp/pr.json" 2>/dev/null)
+[ "$pv" = ok ] || refuse "gh pr view returned unreadable JSON"
+field() { jq -r ".$1" "$tmp/pr.json" || refuse "gh pr view returned unreadable JSON"; }
+st=$(field state) || exit 2; draft=$(field isDraft) || exit 2; cross=$(field isCrossRepository) || exit 2
+head=$(field headRefOid) || exit 2; base=$(field baseRefName) || exit 2; hb=$(field headRefName) || exit 2
+nfiles=$(field changedFiles) || exit 2
+labels=$(jq -r '.labels[].name' "$tmp/pr.json") || refuse "gh pr view returned unreadable JSON"
+[ "$st" = OPEN ] || refuse "PR #$pr is $st, not OPEN"
+[ "$draft" = false ] || refuse "PR #$pr is a draft"
+[ "$cross" = false ] || refuse "PR #$pr comes from another repository (isCrossRepository)"
+[ "$head" = "$sha" ] || refuse "PR #$pr head is $head, not $sha"
+[ "$base" = main ] || refuse "PR #$pr base is $base, not main"
+case "$hb" in ''|*[!A-Za-z0-9._/-]*) refuse "PR #$pr head branch '$hb' is not a plain branch name";; esac
+need_fa=
+case "$hb" in
+  integration/*)
+    [ $ms_set -eq 1 ] || refuse "PR #$pr head branch $hb is a milestone branch: --milestone ${hb#integration/} is required"
+    [ "$hb" = "integration/$ms" ] || refuse "--milestone $ms does not match the head branch $hb (integration/$ms expected)"
+    need_fa="milestone branch $hb";;
+  *) [ $ms_set -eq 0 ] || refuse "--milestone $ms does not match the head branch $hb (integration/$ms expected)";;
+esac
+# 3. Checks on the exact SHA (pinned names per repository), or the standards smoke log; then the legacy status.
+if [ "$r" = ephremdeme/standards ]; then
+  [ $smoke_set -eq 1 ] || refuse "ephremdeme/standards has no PR CI: --smoke-log <path> is required"
+  [ -f "$smoke" ] && [ -r "$smoke" ] || refuse "smoke log $smoke is not a readable file"
+  count() { c=$(grep -c -- "$1" "$smoke"); [ $? -le 1 ] || refuse "smoke log $smoke could not be read"; echo "$c"; }
+  nfail=$(count '^FAIL') || exit 2; npass=$(count '^PASS') || exit 2; nhead=$(count '^smoke-head:') || exit 2
+  [ "$nfail" -eq 0 ] || refuse "smoke log $smoke has $nfail FAIL line(s)"
+  [ "$npass" -ge 1 ] || refuse "smoke log $smoke has no PASS line"
+  [ "$nhead" -ge 1 ] || refuse "smoke log $smoke has no smoke-head line"
+  other=$(grep -- '^smoke-head:' "$smoke" | grep -vx -- "smoke-head: $sha" | head -n 1)
+  [ -z "$other" ] || refuse "smoke log $smoke is for $(printf '%s' "${other#smoke-head:}" | tr -d ' '), not $sha"
+else
+  pinned='["rust / check","rust / secrets","rust / web"]'
+  case "$r" in ephremdeme/exchange) chain=true;; *) chain=false;; esac
+  gh_read "gh api check-runs" "$tmp/checks.json" api --paginate "repos/$r/commits/$sha/check-runs?per_page=100"
+  cv=$(jq -rs --argjson pinned "$pinned" --argjson chain "$chain" "$DEFS"'
+    def chainrun: test("^chain \\(.+\\)$");
+    def ispinned: . as $n | any($pinned[]; . == $n) or ($chain and ($n | chainrun));
+    pages("check_runs") | if .err then "err\t\(.err)" else .items as $runs
+      | if ($runs | length) == 0 then "none"
+        else (first($runs[] | select(.status != "completed") | "pending\t\(.name)\t\(.status)")
+             // first($pinned[] as $p | select(any($runs[]; .name == $p) | not) | "missing\t\($p)")
+             // (if $chain and (any($runs[]; .name | chainrun) | not) then "missing\tchain (*)" else empty end)
+             // first($runs[] | select((.name | ispinned) and .conclusion != "success") | "notsuccess\t\(.name)\t\(.conclusion)")
+             // first($runs[] | select(.conclusion | IN("success", "skipped", "neutral") | not) | "failed\t\(.name)\t\(.conclusion)")
+             // "ok") end end' "$tmp/checks.json" 2>/dev/null) || refuse "check runs on $sha: unreadable JSON"
+  f2=$(printf '%s\n' "$cv" | cut -f2); f3=$(printf '%s\n' "$cv" | cut -f3)
+  case "$cv" in
+    ok) ;;
+    none) refuse "no check runs on $sha";;
+    err*) refuse "check runs on $sha: $f2";;
+    pending*) refuse "check run '$f2' on $sha is $f3, not completed";;
+    missing*) refuse "pinned check run '$f2' is missing on $sha";;
+    notsuccess*) refuse "pinned check run '$f2' on $sha concluded $f3, not success";;
+    failed*) refuse "check run '$f2' on $sha concluded $f3";;
+    *) refuse "check runs on $sha: unreadable JSON";;
+  esac
+fi
+gh_read "gh api commit status" "$tmp/status.json" api "repos/$r/commits/$sha/status"
+sv=$(jq -r 'if type == "object" and (.state | type) == "string" and (.total_count | type) == "number" then "\(.state)\t\(.total_count)" else error("x") end' "$tmp/status.json" 2>/dev/null) \
+  || refuse "commit status on $sha: unreadable JSON"
+s_state=$(printf '%s\n' "$sv" | cut -f1); s_count=$(printf '%s\n' "$sv" | cut -f2)
+[ "$s_count" = 0 ] || [ "$s_state" = success ] || refuse "commit status on $sha is $s_state ($s_count status(es))"
+# 4. The PR's files: .github/**, .claude/**, CODEOWNERS require founder-approved.
+gh_read "gh api pull files" "$tmp/files.json" api --paginate "repos/$r/pulls/$pr/files?per_page=100"
+fv=$(jq -rs --argjson n "$nfiles" 'if length == 0 or any(.[]; type != "array") or any(.[][]; type != "object" or (.filename | type) != "string") then "unreadable"
+    else add | if length != $n then "incomplete\t\(length)"
+    else (first(.[] | (.filename, (.previous_filename // empty))
+               | select(startswith(".github/") or startswith(".claude/") or . == ".github" or . == ".claude" or . == "CODEOWNERS" or endswith("/CODEOWNERS"))
+               | "sensitive\t\(.)") // "ok") end end' "$tmp/files.json" 2>/dev/null) || fv=unreadable
+case "$fv" in
+  ok) ;;
+  sensitive*) [ -n "$need_fa" ] || need_fa="changes $(printf '%s\n' "$fv" | cut -f2)";;
+  incomplete*) refuse "PR #$pr lists $(printf '%s\n' "$fv" | cut -f2) of $nfiles changed files (incomplete)";;
+  *) refuse "the files of PR #$pr are unreadable";;
+esac
+# 5. Milestone PRs (D-088 item 7): the full chain and Codex's last read, from GitHub at the SHA.
+gh_content() { # gh_content <path> <outfile>: the file at <sha> from the contents API, base64-decoded
+  gh_read "gh api contents of $1 at $sha" "$tmp/content.json" api "repos/$r/contents/$1?ref=$sha"
+  b64=$(jq -r 'if type == "object" and .type == "file" and .encoding == "base64" and (.content | type) == "string" and (.content | length) > 0 then .content else error("x") end' "$tmp/content.json" 2>/dev/null) \
+    || refuse "contents of $1 at $sha: unreadable (not a base64 file)"
+  printf '%s\n' "$b64" | base64 -d >"$2" 2>/dev/null || refuse "contents of $1 at $sha: base64 decoding failed"
+}
+if [ $ms_set -eq 1 ]; then
+  # a. The full sequential chain on the exact head: every chain job of one run green.
+  gh_read "gh api nightly.yml runs" "$tmp/nightly.json" api --paginate "repos/$r/actions/workflows/nightly.yml/runs?head_sha=$sha&per_page=100"
+  runs=$(jq -rs --arg s "$sha" "$DEFS"' pages("workflow_runs") | if .err then error(.err) else
+      [.items[] | select(.head_sha == $s) | .id | if type == "number" and . == floor then . else error("id") end] | sort | reverse | .[] | tostring end' \
+      "$tmp/nightly.json" 2>/dev/null) || refuse "nightly.yml runs on $sha: unreadable or incomplete JSON"
+  [ -n "$runs" ] || refuse "no nightly.yml run on $sha"
+  seen=; chain_ok=0
+  for id in $runs; do
+    gh_read "gh api jobs of run $id" "$tmp/jobs.json" api --paginate "repos/$r/actions/runs/$id/jobs?per_page=100"
+    jv=$(jq -rs "$DEFS"' pages("jobs") | if .err then "err\t\(.err)" else [.items[] | select(.name == "chain")] as $c
+        | if ($c | length) == 0 then "no chain job"
+          elif all($c[]; .status == "completed" and .conclusion == "success") then "ok"
+          else [$c[] | "\(.status)/\(.conclusion)"] | join(",") end end' "$tmp/jobs.json" 2>/dev/null) || refuse "jobs of run $id: unreadable JSON"
+    case "$jv" in
+      ok) chain_ok=1; break;;
+      err*) refuse "jobs of run $id: $(printf '%s\n' "$jv" | cut -f2)";;
+    esac
+    seen="$seen${seen:+; }$id: $jv"
+  done
+  [ $chain_ok -eq 1 ] || refuse "no nightly.yml run on $sha has every chain job concluded success ($seen)"
+  # b. Codex's last read is the head, or the head is only its review report on top of what Codex read.
+  rv="docs/md-reports/$ms-milestone-review.md"
+  gh_content "$rv" "$tmp/review"
+  reads=$(grep -- '^codex-last-read:' "$tmp/review"); [ $? -le 1 ] || refuse "$rv at $sha could not be read"
+  [ -n "$reads" ] || refuse "$rv at $sha has no codex-last-read line"
+  nreads=$(printf '%s\n' "$reads" | sort -u | wc -l)
+  [ "$nreads" -eq 1 ] || refuse "$rv at $sha has $nreads different codex-last-read lines"
+  xr=${reads#codex-last-read: }
+  case "$xr" in *[!0-9a-f]*|'') refuse "$rv at $sha: codex-last-read is not a full SHA";; esac
+  [ ${#xr} -eq 40 ] || refuse "$rv at $sha: codex-last-read is not a full SHA"
+  if [ "$xr" != "$sha" ]; then
+    gh_read "gh api compare" "$tmp/compare.json" api "repos/$r/compare/$xr...$sha"
+    cmp=$(jq -r --arg rv "$rv" 'if type != "object" or (.status | type) != "string" or (.files | type) != "array" or any(.files[]; type != "object" or (.filename | type) != "string") then "unreadable"
+        elif (.status == "ahead" or .status == "identical") | not then "status\t\(.status)"
+        elif (.files | length) >= 300 then "truncated\t\(.files | length)"
+        else (first(.files[] | (.filename, (.previous_filename // empty)) | select(. != $rv) | "extra\t\(.)") // "ok") end' \
+        "$tmp/compare.json" 2>/dev/null) || cmp=unreadable
+    c2=$(printf '%s\n' "$cmp" | cut -f2)
+    case "$cmp" in
+      ok) ;;
+      status*) refuse "codex-last-read $xr is not $sha or an ancestor of it (compare: $c2)";;
+      truncated*) refuse "compare $xr...$sha lists $c2 files (possibly truncated)";;
+      extra*) refuse "commits after codex-last-read $xr change $c2 (only $rv may change)";;
+      *) refuse "compare $xr...$sha: unreadable JSON";;
+    esac
+  fi
+fi
+# 6. Labels: presence first, then timing against the newest push of the head branch.
+has_label() { printf '%s\n' "$labels" | grep -Fqx -- "$1"; }
+timed=
+if [ -n "$need_fa" ]; then
+  has_label founder-approved || refuse "label founder-approved is not on PR #$pr (required: $need_fa)"
+  timed=founder-approved
+fi
+if [ $ms_set -eq 1 ]; then
+  if [ $resid_set -eq 1 ]; then
+    gh_content DECISIONS.md "$tmp/decisions"
+    grep -q -- "^- $resid |" "$tmp/decisions"; gq=$?
+    case $gq in 0) ;; 1) refuse "residual $resid is not a decision (- $resid |) in DECISIONS.md at $sha";; *) refuse "DECISIONS.md at $sha could not be read";; esac
+  elif has_label human-gate-accepted; then timed="$timed human-gate-accepted"
+  else refuse "human gate: label human-gate-accepted is not on PR #$pr and no --residual was given"
+  fi
+fi
+if [ -n "$timed" ]; then
+  gh_read "gh api activity" "$tmp/activity.json" api "repos/$r/activity?ref=refs/heads/$hb&per_page=100"
+  av=$(jq -r "$DEFS"'if type != "array" then "unreadable" elif length == 0 then "none"
+      elif any(.[]; type != "object") or (.[0].after | type) != "string" or (.[0].ref | type) != "string" then "unreadable"
+      else (.[0].timestamp | ts) as $t | if any(.[]; (.timestamp | ts) > $t) then "unordered"
+      else "ok\t\(.[0].ref)\t\(.[0].after)\t\($t | floor)" end end' "$tmp/activity.json" 2>/dev/null) || av=unreadable
+  case "$av" in
+    ok*) ;;
+    none) refuse "no push activity for refs/heads/$hb";;
+    unordered) refuse "the activity of refs/heads/$hb is not newest first";;
+    *) refuse "the activity of refs/heads/$hb is unreadable";;
+  esac
+  a_ref=$(printf '%s\n' "$av" | cut -f2); a_after=$(printf '%s\n' "$av" | cut -f3); push_t=$(printf '%s\n' "$av" | cut -f4)
+  [ "$a_ref" = "refs/heads/$hb" ] || refuse "the newest activity entry is for $a_ref, not refs/heads/$hb"
+  [ "$a_after" = "$sha" ] || refuse "the newest push to $hb is $a_after, not $sha"
+  gh_read "gh api timeline" "$tmp/timeline.json" api --paginate "repos/$r/issues/$pr/timeline?per_page=100"
+  for L in $timed; do
+    lv=$(jq -rs --arg L "$L" --argjson P "$push_t" "$DEFS"'
+      if length == 0 or any(.[]; type != "array") or any(.[][]; type != "object") then "unreadable" else add |
+        ([.[] | select(.event == "labeled" and (.label.name? // null) == $L and (.actor.type? // null) == "User" and (.actor.login? // null) == "ephremdeme") | .created_at | ts] | max) as $lab |
+        ([.[] | select(.event == "unlabeled" and (.label.name? // null) == $L) | .created_at | ts] | max) as $unl |
+        if $lab == null then "nolabel"
+        elif $unl != null and $unl >= $lab then "removed\t\($unl | floor | todate)"
+        elif $lab > $P then "ok"
+        else "before\t\($lab | floor | todate)\t\($P | todate)" end end' "$tmp/timeline.json" 2>/dev/null) || lv=unreadable
+    case "$lv" in
+      ok) ;;
+      nolabel) refuse "label $L has no labeled event by the User ephremdeme in the timeline of PR #$pr";;
+      removed*) refuse "label $L was removed at $(printf '%s\n' "$lv" | cut -f2), after its last add by ephremdeme";;
+      before*) refuse "label $L was last added at $(printf '%s\n' "$lv" | cut -f2), not after the last push of $hb at $(printf '%s\n' "$lv" | cut -f3)";;
+      *) refuse "the timeline of PR #$pr is unreadable";;
+    esac
+  done
+fi
+# 7. Merge, pinned to the head every check above was made on.
+if ! gh pr merge "$pr" --repo "$r" --merge --match-head-commit "$sha" >"$tmp/out" 2>"$tmp/err"; then
+  echo "merge-pr: gh pr merge failed — $(head -n 1 "$tmp/err" | grep . || echo '(no message)')" >&2; exit 1
+fi
+echo "merge-pr: OK $r#$pr $sha merged${ms:+ milestone $ms}"

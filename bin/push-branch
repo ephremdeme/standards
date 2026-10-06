@@ -1,0 +1,174 @@
+#!/bin/sh
+# Usage: standards/bin/push-branch <repo-dir> <ref>      (the integrator: the only push path for agents, exchange D-086/D-088)
+# Pushes ONE lane/integration branch or ONE standards release tag to origin, fast-forward only, with an explicit refspec
+# (never --force, -f or a leading +). Refused (exit 2, "push-branch: refused — <reason>") unless ALL hold:
+#  1. <repo-dir> is the top level of a git work tree with no object substitution: no replace refs (refs/replace/*),
+#     no info/grafts file, not shallow (GIT_NO_REPLACE_OBJECTS=1 is exported as well). Every origin URL AS GIT EXPANDS
+#     IT (`git remote get-url --all origin` and `--push --all`, i.e. after url.<base>.insteadOf / pushInsteadOf) is
+#     github.com[:/]ephremdeme/<name>[.git] (https://, git@ or ssh://git@), one <name> in exchange, standards, game, hub;
+#     and the pushed ref descends from that repository's root commit (the table in roots() below), so a checkout of
+#     one repository cannot be pushed into another. game's root is not in the table yet: game is refused here (push
+#     it from the game session) until a game session adds it.
+#  2. no tracked change in the working tree or the index (git status --porcelain --untracked-files=no is empty);
+#  3. <ref> is a branch integration/<x>, opus/<x>, fable/<x> or ds/<x> (<x> = [a-z0-9][a-z0-9._-]*, a valid ref name)
+#     or a tag vN.N.N; never main, master or HEAD, nothing containing ":", "+", ".." or whitespace;
+#  4. branch: it exists locally; origin's tip (git ls-remote; absent is fine), once fetched, is an ancestor of the local
+#     tip; pushed as refs/heads/<b>:refs/heads/<b>;
+#  5. tag: it is annotated (git cat-file -t = tag); the repository is standards; its commit is an ancestor of origin's
+#     main (fetched); if origin already has the tag it must be the same tag object (then nothing is pushed and the
+#     success line ends "already-present"); else pushed as refs/tags/<t>:refs/tags/<t>.
+# Every git call runs with -c core.hooksPath=/dev/null -c core.fsmonitor=false -c remote.origin.mirror=false (no hook,
+# no fsmonitor command, no mirror push), the push with --no-verify --no-follow-tags --recurse-submodules=no. Every git
+# error during the checks refuses: an empty or failed read is never "fine". STILL OPEN: credential.helper,
+# core.sshCommand (and other command-valued keys) in the repository's config run code during fetch/push; only the
+# founder's permission deny on `git config` / `git -c` / writes under .git closes that path.
+# PUSH_BRANCH_ROOTS_FILE (tests only; must never be set in an agent's environment): a file of "<name> <root-sha>" lines
+# that REPLACES the root table, so the tests can use fixture repositories; when set, a WARN line goes to stderr.
+# Exit 1: the push itself failed after every check passed. Exit 0: one line "push-branch: OK <ref> <sha>" (<sha> = the
+# branch tip or the tag object), "push-branch: OK <ref> <sha> already-present" for a tag origin already has.
+set -u
+LC_ALL=C; export LC_ALL
+GIT_NO_REPLACE_OBJECTS=1; export GIT_NO_REPLACE_OBJECTS
+refuse() { echo "push-branch: refused — $1" >&2; exit 2; }
+[ $# -eq 2 ] || { echo "push-branch: usage: push-branch <repo-dir> <ref>" >&2; exit 2; }
+dir=$1; ref=$2
+roots() { # roots <name>: the root commit of ephremdeme/<name> (read from the founders' checkouts on 2026-10-06)
+  if [ -n "${PUSH_BRANCH_ROOTS_FILE:-}" ]; then
+    echo "push-branch: WARN — root commits read from PUSH_BRANCH_ROOTS_FILE=$PUSH_BRANCH_ROOTS_FILE (tests only; never set for an agent)" >&2
+    [ -f "$PUSH_BRANCH_ROOTS_FILE" ] && [ -r "$PUSH_BRANCH_ROOTS_FILE" ] || return 1
+    awk -v n="$1" '$1 == n { print $2 }' "$PUSH_BRANCH_ROOTS_FILE"; return 0
+  fi
+  case "$1" in
+    exchange) echo f15713f1b3261a4cc1d0e563230a6d8aa32f7d82;;
+    standards) echo 4e78d67036ddafaa07c9dac9bb74249c4dd2e895;;
+    hub) echo 75422b757cdc5cc37efb54035fac7aeea17da33e;;
+    *) ;;
+  esac
+}
+# 1. Repository, no object substitution, origin.
+nottop() { refuse "$dir is not the top level of a git repository"; }
+[ -d "$dir" ] || nottop
+abs=$(cd "$dir" 2>/dev/null && pwd -P) || nottop
+g() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c remote.origin.mirror=false -C "$abs" "$@"; }
+top=$(g rev-parse --show-toplevel 2>/dev/null) && [ -n "$top" ] && [ "$(cd "$top" 2>/dev/null && pwd -P)" = "$abs" ] || nottop
+grafts=$(g rev-parse --path-format=absolute --git-path info/grafts 2>/dev/null) && [ -n "$grafts" ] || refuse "git rev-parse --git-path failed in $abs"
+[ ! -e "$grafts" ] || refuse "$abs has an info/grafts file (history substitution)"
+shallow=$(g rev-parse --is-shallow-repository 2>/dev/null) || refuse "git rev-parse --is-shallow-repository failed in $abs"
+case "$shallow" in false) ;; true) refuse "$abs is a shallow clone";; *) refuse "git rev-parse --is-shallow-repository said '$shallow'";; esac
+repl=$(g for-each-ref --format='%(refname)' refs/replace/) || refuse "git for-each-ref refs/replace failed in $abs"
+[ -z "$repl" ] || refuse "$abs has replace refs ($(printf '%s\n' "$repl" | head -n 1))"
+repo_name() { # repo_name <url>: prints exchange|standards|game|hub for an ephremdeme GitHub URL, fails otherwise
+  case "$1" in
+    https://github.com/ephremdeme/*) n=${1#https://github.com/ephremdeme/};;
+    git@github.com:ephremdeme/*) n=${1#git@github.com:ephremdeme/};;
+    ssh://git@github.com/ephremdeme/*) n=${1#ssh://git@github.com/ephremdeme/};;
+    *) return 1;;
+  esac
+  n=${n%.git}
+  case "$n" in exchange|standards|game|hub) printf '%s\n' "$n";; *) return 1;; esac
+}
+check_urls() { # check_urls <label> <urls>: every line names the same ephremdeme repository; sets name
+  [ -n "$2" ] || refuse "origin has no $1 in $abs"
+  [ "$(printf '%s\n' "$2" | grep -c .)" -eq "$(printf '%s\n' "$2" | wc -l)" ] || refuse "origin has an empty $1 in $abs"
+  old_ifs=$IFS; IFS='
+'; set -f
+  for u in $2; do
+    un=$(repo_name "$u") || refuse "origin $1 $u is not github.com/ephremdeme/{exchange,standards,game,hub}"
+    [ -z "$name" ] || [ "$un" = "$name" ] || refuse "origin $1 $u is not github.com/ephremdeme/$name"
+    name=$un
+  done
+  set +f; IFS=$old_ifs
+}
+name=
+fetch_urls=$(g remote get-url --all origin 2>/dev/null) || refuse "origin has no URL in $abs"
+check_urls URL "$fetch_urls"
+push_urls=$(g remote get-url --push --all origin 2>/dev/null) || refuse "git remote get-url --push origin failed in $abs"
+check_urls "push URL" "$push_urls"
+# 2. No tracked change (capture first: a failing git status is never a clean tree).
+st=$(g status --porcelain --untracked-files=no --ignore-submodules=none) || refuse "git status failed in $abs"
+[ -z "$st" ] || refuse "tracked changes in $abs: $(printf '%s\n' "$st" | head -n 1 | cut -c4-)"
+# 3. The ref.
+case "$ref" in main|master|HEAD) refuse "$ref is never pushed by an agent";; esac
+case "$ref" in
+  *:*) refuse "$ref contains \":\" (refs are pushed only as refs/heads/<b>:refs/heads/<b>)";;
+  *+*) refuse "$ref contains \"+\" (never a forced push)";;
+  *..*) refuse "$ref contains \"..\"";;
+  *[[:space:]]*) refuse "$ref contains whitespace";;
+esac
+notref() { refuse "$ref is not an integration/, opus/, fable/ or ds/ branch nor a vN.N.N tag"; }
+case "$ref" in
+  integration/*|opus/*|fable/*|ds/*)
+    kind=branch; rest=${ref#*/}
+    case "$rest" in [a-z0-9]*) ;; *) notref;; esac
+    case "$rest" in *[!a-z0-9._-]*) notref;; esac
+    full=refs/heads/$ref;;
+  v[0-9]*)
+    kind=tag; rest=${ref#v}
+    case "$rest" in *[!0-9.]*) notref;; esac
+    case "$rest" in [0-9]*.[0-9]*.[0-9]*) ;; *) notref;; esac
+    [ "$(printf '%s' "$rest" | tr -cd . | wc -c)" -eq 2 ] || notref
+    full=refs/tags/$ref;;
+  *) notref;;
+esac
+git check-ref-format "$full" || refuse "$ref is not a valid ref name"
+# The pushed commit descends from the repository's root commit.
+check_root() { # check_root <commit>
+  want_root=$(roots "$name") || refuse "PUSH_BRANCH_ROOTS_FILE is not a readable file"
+  [ -n "$want_root" ] || refuse "the root commit of ephremdeme/$name is unknown here; push $name from its own session"
+  [ "$(printf '%s\n' "$want_root" | wc -l)" -eq 1 ] || refuse "more than one root commit listed for ephremdeme/$name"
+  have_roots=$(g rev-list --max-parents=0 "$1" 2>/dev/null) && [ -n "$have_roots" ] || refuse "git rev-list --max-parents=0 $ref failed"
+  printf '%s\n' "$have_roots" | grep -Fqx -- "$want_root" || refuse "$ref does not descend from the root commit of ephremdeme/$name ($want_root)"
+}
+# origin's object for exactly <full ref>: sets rsha (empty when origin does not have it); refuses on any error.
+remote_sha() {
+  rs_out=$(g ls-remote --exit-code origin "$1" 2>&1); rs_rc=$?
+  rsha=
+  case $rs_rc in 0) ;; 2) return 0;; *) refuse "git ls-remote origin $1 failed: $(printf '%s\n' "$rs_out" | tail -n 1)";; esac
+  rsha=$(printf '%s\n' "$rs_out" | awk -v r="$1" '$2 == r { print $1 }')
+  [ "$(printf '%s\n' "$rsha" | wc -l)" -eq 1 ] || refuse "git ls-remote origin $1 returned more than one object"
+  case "$rsha" in '') return 0;; *[!0-9a-f]*) refuse "git ls-remote origin $1 returned an unreadable object name";; esac
+}
+fetch_tip() { # fetch_tip <branch> <sha>: fetch origin's branch and make sure <sha> is now a local commit
+  f_out=$(g fetch -q --no-tags --no-recurse-submodules origin "refs/heads/$1" 2>&1) \
+    || refuse "git fetch origin $1 failed: $(printf '%s\n' "$f_out" | tail -n 1)"
+  g cat-file -e "$2^{commit}" 2>/dev/null || refuse "origin's $1 tip $2 is not a local commit after the fetch"
+}
+is_ancestor() { # is_ancestor <a> <b>: 0 yes, 1 no; refuses on a git error
+  g merge-base --is-ancestor "$1" "$2" 2>/dev/null; ia=$?
+  case $ia in 0|1) return $ia;; *) refuse "git merge-base --is-ancestor $1 $2 failed";; esac
+}
+do_push() {
+  g push -q --no-verify --no-follow-tags --recurse-submodules=no origin "$1:$1" || { echo "push-branch: git push of $1 to origin failed" >&2; exit 1; }
+}
+if [ "$kind" = branch ]; then
+  # 4. Branch: local, from this repository's root, fast-forward over origin's tip.
+  local_sha=$(g rev-parse -q --verify "$full^{commit}" 2>/dev/null) || refuse "no local branch $ref"
+  check_root "$local_sha"
+  remote_sha "$full"
+  if [ -n "$rsha" ]; then
+    fetch_tip "$ref" "$rsha"
+    is_ancestor "$rsha" "$local_sha" || refuse "origin's $ref ($rsha) is not an ancestor of the local $ref (fast-forward only)"
+  fi
+  do_push "$full"
+  echo "push-branch: OK $ref $local_sha"
+  exit 0
+fi
+# 5. Tag: annotated, standards, from its root, on origin's main, not on origin at another object.
+tobj=$(g rev-parse -q --verify "$full" 2>/dev/null) || refuse "no local tag $ref"
+ttype=$(g cat-file -t "$tobj" 2>/dev/null) || refuse "git cat-file -t $ref failed"
+[ "$ttype" = tag ] || refuse "$ref is not an annotated tag (git cat-file -t: $ttype)"
+[ "$name" = standards ] || refuse "tags are pushed only to ephremdeme/standards, not ephremdeme/$name"
+tcommit=$(g rev-parse -q --verify "$full^{commit}" 2>/dev/null) || refuse "tag $ref does not point at a commit"
+check_root "$tcommit"
+remote_sha refs/heads/main
+[ -n "$rsha" ] || refuse "origin has no main"
+fetch_tip main "$rsha"
+is_ancestor "$tcommit" "$rsha" || refuse "$ref ($tcommit) is not on origin's main"
+remote_sha "$full"
+if [ -n "$rsha" ]; then
+  [ "$rsha" = "$tobj" ] || refuse "origin already has $ref at $rsha, not $tobj"
+  echo "push-branch: OK $ref $tobj already-present"
+  exit 0
+fi
+do_push "$full"
+echo "push-branch: OK $ref $tobj"
