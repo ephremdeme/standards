@@ -18,12 +18,27 @@
 # is `check --only <kind>` (owned-paths --kind). C5: the post-run judgement (check + instrument) runs under the machine
 # build lock this script acquires; BUILD_LOCK_TOKEN reaches the judges only, never claude; the lock is not held while
 # claude runs.
+# Standards docs lanes (docs/07 §1, DeepSeek scope 3): the standards repository, known by its root commit (never by a
+# file a lane could add or delete), has no `check` and no instrument. There every path TASK §3 owns, and after the run
+# every changed path, must be a literal path in the docs allow-list (docs/ except docs/05*, the prose templates
+# templates/*.md, CHANGELOG.md, README.md; no agent-instruction file, no dot segment), and every committed file mode
+# 100644, so the judges and the policy (bin/, tests/, smoke/, .github/, agents/, prompts/, specs/, every non-prose
+# template a product repo copies, CLAUDE.md/AGENTS*.md, .claude/.codex) are out of reach. TASK §5 names the judges as
+# `sh tests/<name>.t.sh`; after the run each of them and the markdown judge `tests/docs.t.sh --judge` (on every
+# docs/**/*.md and README.md) run from a tree built from the PRE-run commit, with only the allow-listed paths taken
+# from the lane's commit. No build lock (nothing is built); logs go to the worktree's git dir.
+# Every repo: a dispatcher that lies inside the lane worktree (the lane's own copy) is refused; run the primary's.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd -P)
 wt=${1:?absolute worktree path}; effort=${2:-max}
 case "$effort" in max|high) ;; *) echo "dispatch-deepseek: effort must be max or high, not '$effort'" >&2; exit 2;; esac
 [ -n "${DS_API_KEY:-}" ] || { echo "dispatch-deepseek: DS_API_KEY not set" >&2; exit 2; }
 top=$(git -C "$wt" rev-parse --show-toplevel)
+# The judges must not be the lane's own bytes: a copy of this script inside the lane worktree could have been edited
+# by an earlier run of that lane (or ship the lane's task-lint and owned-paths).
+top_p=$(cd "$top" && pwd -P) || { echo "dispatch-deepseek: refused — cannot resolve $top" >&2; exit 2; }
+case "$here/" in "$top_p"/*)
+  echo "dispatch-deepseek: refused — this dispatcher lies inside the lane worktree ($here); run the primary checkout's copy" >&2; exit 2;; esac
 # The primary checkout (a lane worktree shares its object store and inherits its workspace trust).
 root=$(cd "$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)/.." && pwd -P)
 # .no-deepseek is judged on the PRIMARY checkout's committed tree (and the lane's), not only on the lane's files:
@@ -53,6 +68,41 @@ sh "$here/task-lint" "$wt" >&2 || { echo "dispatch-deepseek: refused — task-li
 own=$(sh "$here/owned-paths" "$task") || { echo "dispatch-deepseek: refused — the owned-paths block of TASK §3 is unreadable" >&2; exit 2; }
 if printf '%s\n' "$own" | grep -Eqi -e '/admin([^A-Za-z0-9_-]|$)' -e '(^|[^A-Za-z0-9_-])admin(/|\.[A-Za-z0-9])'; then
   echo "dispatch-deepseek: refused — admin surface in TASK §3 cannot go to DeepSeek even with DISPATCH_ALLOW_HIGH" >&2; exit 2; fi
+# The standards repository: its root commit is in the lane's history (capture first: a git error is a refusal).
+STD_ROOT=4e78d67036ddafaa07c9dac9bb74249c4dd2e895
+STD_ALLOW="literal paths in docs/ except docs/05*, templates/NAME.md (prose, one segment), CHANGELOG.md, README.md; no CLAUDE.md, CLAUDE.local.md, AGENTS*.md or dot segment"
+roots=$(git -C "$wt" rev-list --max-parents=0 HEAD) || { echo "dispatch-deepseek: refused — cannot read the root commits of $wt" >&2; exit 2; }
+std=0; if printf '%s\n' "$roots" | grep -qx "$STD_ROOT"; then std=1; fi
+std_allowed() { # std_allowed <path or owned pattern>: 0 only for a literal path inside the docs allow-list.
+  # Literal only: a `*` (an owned glob, or a literal `*` in a changed name) is refused, since it also matches `/`, dot
+  # files and agent-instruction files. Every segment must be non-empty, not start with `.` (`.`, `..`, .claude, .codex,
+  # .gitattributes) and not be an agent-instruction file (CLAUDE.md, CLAUDE.local.md, AGENTS*.md: instructions are not
+  # "non-sensitive prose"). The regions match exactly (docs/, templates/, CHANGELOG.md, README.md: `Docs/x.md` is
+  # refused); the exceptions inside them are compared case-insensitively (a case-insensitive checkout maps docs/05… onto
+  # DOCS/05…): docs/05* is refused, and templates/ admits only one segment ending in .md (any case).
+  case "$1" in *"*"*) return 1;; esac
+  sa_low=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+  sa_rest=$sa_low/
+  while [ -n "$sa_rest" ]; do
+    sa_seg=${sa_rest%%/*}; sa_rest=${sa_rest#*/}
+    case "$sa_seg" in ''|.*|claude.md|claude.local.md|agents*.md) return 1;; esac
+  done
+  case "$1" in
+    docs/*) case "${sa_low#docs/}" in 05*) return 1;; esac; return 0;;
+    templates/*) case "${sa_low#templates/}" in */*) return 1;; ?*.md) return 0;; *) return 1;; esac;;
+    CHANGELOG.md|README.md) return 0;;
+    *) return 1;;
+  esac; }
+if [ "$std" = 1 ]; then
+  bad_own=""
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    std_allowed "$p" || bad_own="$bad_own${bad_own:+ }$p"
+  done <<EOF
+$own
+EOF
+  [ -z "$bad_own" ] || { echo "dispatch-deepseek: refused — TASK §3 owns $bad_own, outside the standards docs allow-list ($STD_ALLOW)" >&2; exit 2; }
+fi
 # C6: the lane is judged by the checks that match it.
 kind=$(sh "$here/owned-paths" --kind "$task") || { echo "dispatch-deepseek: refused — the owned-paths block of TASK §3 is unreadable" >&2; exit 2; }
 branch=$(sed -n 's/^Branch: //p' "$task")
@@ -66,9 +116,20 @@ command -v jq >/dev/null 2>&1 || { echo "dispatch-deepseek: refused — jq is re
 jq -e --arg p "$root" '.projects[$p].hasTrustDialogAccepted == true' "$HOME/.claude.json" >/dev/null 2>&1 \
   || { echo "dispatch-deepseek: refused — $root is not a trusted Claude Code workspace; run \`claude\` once inside it and accept the dialog" >&2; exit 2; }
 # The lane's instrument section, read from TASK §5 BEFORE the run: the lane cannot rewrite what it is judged by.
+# In the standards repository: the judges `sh tests/<name>.t.sh` it names, each present at HEAD, plus tests/docs.t.sh.
+if [ "$std" = 1 ]; then
+  sjudges=$(awk '/^## /{ s = ($0 ~ /^## 5\./) } s' "$task" | { grep -oE 'sh tests/[A-Za-z0-9_-][A-Za-z0-9_.-]*\.t\.sh' || true; } | sed 's/^sh //' | awk '!seen[$0]++')
+  [ -n "$sjudges" ] || { echo "dispatch-deepseek: refused — TASK §5 names no judge (sh tests/<name>.t.sh); the standards repository has no instrument" >&2; exit 2; }
+  head0=$(git -C "$wt" rev-parse HEAD) || { echo "dispatch-deepseek: refused — git rev-parse HEAD failed in $wt" >&2; exit 2; }
+  for j in $sjudges tests/docs.t.sh; do
+    git -C "$wt" cat-file -e "$head0:$j" 2>/dev/null || { echo "dispatch-deepseek: refused — TASK §5 judge $j does not exist at $head0" >&2; exit 2; }
+  done
+  jlist=""; for j in $sjudges; do jlist="${jlist}sh $j, "; done
+else
 inst=$(awk '/^## /{ s = ($0 ~ /^## 5\./) } s' "$task" | sed -n 's/.*\(scripts\/verify\/m[0-9_]*\.sh\) --section \([a-z0-9_-][a-z0-9_-]*\).*/\1 \2/p' | head -n 1)
 [ -n "$inst" ] || { echo "dispatch-deepseek: refused — TASK §5 names no instrument section (scripts/verify/mN.sh --section <name>, N a number)" >&2; exit 2; }
 script=${inst% *}; section=${inst#* }
+fi
 # Retro review 13: nothing of the caller's environment reaches claude, check or the instrument except this allowlist
 # (SHELL included: Claude Code's Bash tool needs a shell). Secrets exported in the caller's shell stay there.
 allow="HOME PATH USER LANG LC_ALL TERM TMPDIR XDG_CONFIG_HOME SHELL"
@@ -94,17 +155,33 @@ d073() { [ "$high" = 0 ] || echo "dispatch-deepseek: HIGH lane sent to DeepSeek 
 if [ "${DISPATCH_DRY_RUN:-0}" = 1 ]; then
   d073
   echo "dispatch-deepseek: environment passed to claude (names only): $(ds_env env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' | sort | tr '\n' ' ')"
+  if [ "$std" = 1 ]; then
+    echo "dispatch-deepseek: standards docs lane (root ${STD_ROOT%"${STD_ROOT#???????}"}): every changed path must lie in $STD_ALLOW"
+    echo "dispatch-deepseek: judges after the run (from the pre-run commit): ${jlist}sh tests/docs.t.sh --judge <every docs/**/*.md and README.md>"
+  else
   echo "dispatch-deepseek: instrument after the run: $script --section $section"
   echo "dispatch-deepseek: checks after the run: check --only $kind, $script --section $section"
+  fi
   echo "dispatch-deepseek: checks passed (dry run, nothing dispatched)"; exit 0
 fi
-brief=$(sed "s|<ABS_WORKTREE>|$wt|g" "$wt/standards/prompts/dispatch-brief.md")
+if [ "$std" = 1 ]; then
+  # The standards repository is its own pinned copy: the brief comes from the lane's tree (prompts/ is outside the
+  # allow-list, and task-lint has seen the tree clean), with what differs from a product lane said once.
+  brief=$(sed "s|<ABS_WORKTREE>|$wt|g" "$wt/prompts/dispatch-brief.md")
+  brief="$brief
+This worktree is the standards repository itself: there is no standards/ copy, no standards/bin/check and no instrument. Change only $STD_ALLOW. Your judges are the tests TASK §5 names (run each as \`sh tests/<name>.t.sh\`) and \`sh tests/docs.t.sh --judge $wt <every docs/**/*.md and README.md>\` (relative links resolve, no template placeholders). Every file you commit keeps mode 100644 (no symlinks, no executables)."
+  gd=$(git -C "$wt" rev-parse --absolute-git-dir) || { echo "dispatch-deepseek: refused — git rev-parse --absolute-git-dir failed in $wt" >&2; exit 2; }
+  runlog=$gd/lane-run.log; checklog=$gd/lane-check.log
+else
+  brief=$(sed "s|<ABS_WORKTREE>|$wt|g" "$wt/standards/prompts/dispatch-brief.md")
+  runlog=.lane-run.log; checklog=.lane-check.log
+fi
 d073
 cd "$wt"
 before=$(git rev-parse HEAD)
 rc=0
-ds_env claude -p "$brief" --permission-mode acceptEdits --disallowedTools WebSearch WebFetch < /dev/null > .lane-run.log 2>&1 || rc=$?
-tail -n 20 .lane-run.log   # final report only; never read full transcripts
+ds_env claude -p "$brief" --permission-mode acceptEdits --disallowedTools WebSearch WebFetch < /dev/null > "$runlog" 2>&1 || rc=$?
+tail -n 20 "$runlog"   # final report only; never read full transcripts
 # Verify on bytes, not on the report:
 fail() { echo "dispatch-deepseek: $1" >&2; exit 1; }
 [ "$rc" -eq 0 ] || fail "claude failed (rc=$rc)"
@@ -126,6 +203,54 @@ tags=$(git ls-files -v) || fail "dirty tree (git ls-files failed)"
 if printf '%s\n' "$tags" | grep -v -e '^H ' -e '^$' | grep -q .; then fail "dirty tree (hidden edits: skip-worktree or assume-unchanged entries)"; fi
 repl=$(git for-each-ref refs/replace) || fail "dirty tree (git for-each-ref failed)"
 [ -z "$repl" ] || fail "dirty tree (hidden edits: refs/replace present)"
+if [ "$std" = 1 ]; then
+  # Every changed path, both sides of a rename, in the docs allow-list: the judges and the policy stay out of reach.
+  # A name git had to quote starts with `"` and is outside the list (fail closed).
+  outside=""
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    std_allowed "$p" || outside="$outside$p
+"
+  done <<EOF
+$both
+EOF
+  [ -z "$outside" ] || { printf '%s' "$outside" | head -n 10 >&2; fail "lane changed a path outside the standards docs allow-list ($STD_ALLOW)"; }
+  # Prose is a regular non-executable file: both sides of every change are 000000 (absent) or 100644; a symlink
+  # (120000), a gitlink (160000) or an executable (100755) is refused, printed as `<mode> <path>`.
+  raw=$(git -c core.quotePath=false diff --raw --no-renames "$before" "$after") || fail "dirty tree (git diff --raw $before $after failed)"
+  modes=$(printf '%s\n' "$raw" | awk -F '\t' 'NF >= 2 { split($1, m, " "); s = substr(m[1], 2); d = m[2]
+      if (s != "000000" && s != "100644") print s " " $2; else if (d != "000000" && d != "100644") print d " " $2 }') \
+    || fail "dirty tree (reading the file modes failed)"
+  [ -z "$modes" ] || { printf '%s\n' "$modes" | head -n 10 >&2; fail "lane committed a file mode other than 100644 (symlink, gitlink or executable)"; }
+  # The judge tree: the PRE-run commit (bin/, tests/, smoke/ and the rest), with only the allow-listed paths taken from
+  # the lane's commit, so the named tests see the new prose and run the old judges.
+  judge_dir=$(mktemp -d) || fail "judge tree (mktemp failed)"; trap 'rm -rf "$judge_dir"' EXIT
+  jt=$judge_dir/tree; mkdir "$jt" || fail "judge tree (mkdir failed)"
+  { git archive --format=tar -o "$judge_dir/pre.tar" "$before" && tar -xf "$judge_dir/pre.tar" -C "$jt"; } || fail "judge tree (git archive $before failed)"
+  rm -rf "$jt/docs" "$jt/templates" "$jt/CHANGELOG.md" "$jt/README.md"
+  ov=""; for p in docs templates CHANGELOG.md README.md; do if git cat-file -e "$after:$p" 2>/dev/null; then ov="$ov $p"; fi; done
+  if [ -n "$ov" ]; then
+    # shellcheck disable=SC2086 # $ov holds fixed names without spaces
+    { git archive --format=tar -o "$judge_dir/post.tar" "$after" -- $ov && tar -xf "$judge_dir/post.tar" -C "$jt"; } || fail "judge tree (git archive $after failed)"
+  fi
+  : > "$checklog" || fail "cannot write $checklog"
+  for j in $sjudges; do
+    base_env sh "$jt/$j" >> "$checklog" 2>&1 || { tail -n 10 "$checklog" >&2; fail "judge failed ($j from $before; see $checklog)"; }
+  done
+  # Every markdown doc of the lane's tree, not only the changed ones: a deleted or renamed doc that another doc links to
+  # fails here. A name git had to quote is passed as is and fails the judge as "no such file" (fail closed).
+  sdocs=$(git -c core.quotePath=false ls-tree -r --name-only "$after" -- docs README.md) || fail "docs judge failed (git ls-tree $after failed)"
+  sdocs=$(printf '%s\n' "$sdocs" | grep -Ei -e '^docs/.*\.md$' -e '^README\.md$' || true)
+  set --
+  while IFS= read -r p; do if [ -n "$p" ]; then set -- "$@" "$p"; fi; done <<EOF
+$sdocs
+EOF
+  base_env sh "$jt/tests/docs.t.sh" --judge "$jt" "$@" >> "$checklog" 2>&1 \
+    || { grep -E '^docs: (FAIL|FAILED)' "$checklog" | head -n 20 >&2 || true; fail "docs judge failed (tests/docs.t.sh --judge from $before; see $checklog)"; }
+  jdone=""; for j in $sjudges; do jdone="$jdone$j and "; done
+  echo "dispatch-deepseek: OK — new commit $after, clean tree, every changed path in the docs allow-list, ${jdone}tests/docs.t.sh --judge green"
+  exit 0
+fi
 # The lane may not touch what judges it: the instruments, the pinned standards (check, verify-lib) or the submodule map.
 touched=$(git diff --name-only "$before" "$after") || fail "no commit (git diff $before $after failed)"
 judges=$(printf '%s\n' "$touched" | grep -E -e '^scripts/verify/' -e '^standards(/|$)' -e '^\.gitmodules$' || true)

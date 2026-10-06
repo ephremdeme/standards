@@ -396,6 +396,80 @@ git worktree remove --force "$W"; git rm -q .no-deepseek; git commit -qm rmnods
 grep -rq 'deepseek' "$H/agents" && bad "agent files reference deepseek" || ok "Claude reviewer agents contain no DeepSeek routing"
 blk "live DeepSeek run (needs DS_API_KEY + claude CLI) — first LOW lane in G0"
 
+# --- 5d. DeepSeek standards-docs lanes (docs/07 §1, DeepSeek scope 3): the standards repo, known by its root commit -----
+# A clone of $H keeps the real root commit; the working-tree bytes of $H's TRACKED files are committed on top, so these
+# cases judge the bytes being smoked, and an untracked file of the caller's checkout (a lane's TASK.md) never enters the
+# fixture. A fixture doc linking to docs/07 is committed too (the deletion case). Prose-only allow-list before and after
+# the run; the judges are TASK §5's tests/*.t.sh and tests/docs.t.sh, taken from the pre-run commit.
+SD="$T/std"; SW="$T/std-wt"; SROOT=4e78d67036ddafaa07c9dac9bb74249c4dd2e895
+if git clone -q "$H" "$SD" >/dev/null 2>&1 && git -C "$SD" rev-list --max-parents=0 HEAD | grep -qx "$SROOT"; then
+  git -C "$H" ls-files -z | (cd "$H" && tar --null -T - -cf -) | (cd "$SD" && tar -xf -)
+  printf '# Links\nSee [the harness](07-harness.md).\n' > "$SD/docs/links.md"
+  git -C "$SD" add -A >/dev/null 2>&1; git -C "$SD" commit -qm "smoke: the working tree under test" --allow-empty
+  git -C "$SD" worktree add -q "$SW" -b ds/docs-lane; SDR=$(cd "$SD" && pwd -P); SWB=$(git -C "$SW" rev-parse HEAD)
+  printf '{"projects":{"%s":{"hasTrustDialogAccepted":true},"%s":{"hasTrustDialogAccepted":true}}}\n' "${GR:-/nonexistent}" "$SDR" > "$T/h/.claude.json"
+  mkstd(){ # mkstd <owned lines> <§5 line>: a standards lane TASK (header, headings 1-7, the owned-paths block)
+    printf 'Branch: ds/docs-lane\nBase: %s\nRisk: LOW\n\n## 1. Read first\n- docs/07-harness.md\n\n## 2. What this is\nsmoke docs lane\n\n## 3. Files you own\n```owned\n%s\n```\n\n## 4. Hard rules\n- none\n\n## 5. Verify\n- %s\n\n## 6. Commit subject\ndocs: smoke\n\n## 7. Binding facts\n- none\n' "$SWB" "$1" "$2" > "$SW/TASK.md"; }
+  sd_run(){ # sd_run <label> <rc> <dry: 1|0> <regex>...: exit code and every regex; a dry run or a stub claude run
+    sd_l=$1; sd_rc=$2; sd_dry=$3; shift 3
+    HOME=$T/h DS_API_KEY=dummy DISPATCH_DRY_RUN=$sd_dry PATH="$T/stub:$PATH" sh -c "${SD_DD:-$DD} $SW" >$T/o 2>&1; rc=$?; sd_miss=""
+    for sd_re in "$@"; do grep -Eq -- "$sd_re" $T/o || sd_miss="$sd_miss /$sd_re/"; done
+    if [ $rc -eq "$sd_rc" ] && [ -z "$sd_miss" ]; then ok "$sd_l"; else bad "$sd_l (rc=$rc, want $sd_rc${sd_miss:+; missing$sd_miss})"; tail -n 8 $T/o; fi
+    git -C "$SW" reset -q --hard "$SWB"; }
+  ALLOW='outside the standards docs allow-list'
+  mkstd "$(printf 'docs/07-harness.md\nCHANGELOG.md\ntemplates/milestone.md')" 'sh tests/owned-paths.t.sh'
+  sd_run "standards: a docs lane (docs/07, CHANGELOG.md, templates/milestone.md; judge sh tests/owned-paths.t.sh) is accepted (dry run)" 0 1 \
+    '^dispatch-deepseek: standards docs lane \(root 4e78d67\)' \
+    '^dispatch-deepseek: judges after the run \(from the pre-run commit\): sh tests/owned-paths\.t\.sh, sh tests/docs\.t\.sh --judge <every docs/\*\*/\*\.md and README\.md>$' \
+    '^dispatch-deepseek: checks passed \(dry run, nothing dispatched\)$'
+  mkstd 'templates/X.MD' 'sh tests/owned-paths.t.sh'
+  sd_run "standards: case variant templates/X.MD (one segment, .md suffix in any case) is accepted (dry run)" 0 1 '^dispatch-deepseek: checks passed \(dry run, nothing dispatched\)$'
+  SD_DD="$SW/bin/dispatch-deepseek"; mkstd 'docs/07-harness.md' 'sh tests/owned-paths.t.sh'
+  sd_run "control: the lane's own copy of the dispatcher (inside the lane worktree) is refused" 2 1 "^dispatch-deepseek: refused — this dispatcher lies inside the lane worktree"
+  SD_DD=""
+  sd_own(){ # sd_own <owned path>: refused before dispatch, the message naming exactly that path
+    mkstd "$1" 'sh tests/owned-paths.t.sh'; sd_re=$(printf '%s' "$1" | sed 's/[].[*^$\\+?(){}|]/\\&/g')
+    sd_run "control: standards: a lane owning $1 is refused before dispatch" 2 1 "^dispatch-deepseek: refused — TASK §3 owns $sd_re, $ALLOW"; }
+  for p in 'docs/0*' 'templates/*.md' 'templates/a/b.md' 'CHANGELOG.md*' 'README.md*' 'Docs/x.md' 'DOCS/05-domain-rules.md' \
+    'docs/CLAUDE.md' 'templates/CLAUDE.md' 'docs/sub/AGENTS.override.md' 'docs/.gitattributes' 'docs/.claude/x.md' \
+    'docs//05-domain-rules.md' 'docs/./05-domain-rules.md'; do sd_own "$p"; done
+  mkstd 'bin/x' 'sh tests/owned-paths.t.sh'
+  sd_run "control: standards: a lane owning bin/x is refused before dispatch" 2 1 "^dispatch-deepseek: refused — TASK §3 owns bin/x, $ALLOW"
+  mkstd 'docs/05-domain-rules.md' 'sh tests/owned-paths.t.sh'
+  sd_run "control: standards: a lane owning docs/05-domain-rules.md is refused before dispatch" 2 1 "^dispatch-deepseek: refused — TASK §3 owns docs/05-domain-rules\.md, $ALLOW"
+  mkstd 'templates/deepseek.sh' 'sh tests/owned-paths.t.sh'
+  sd_run "control: standards: a lane owning templates/deepseek.sh is refused before dispatch" 2 1 "^dispatch-deepseek: refused — TASK §3 owns templates/deepseek\.sh, $ALLOW"
+  mkstd 'templates/claude-settings.json' 'sh tests/owned-paths.t.sh'
+  sd_run "control: standards: a lane owning templates/claude-settings.json (not prose) is refused before dispatch" 2 1 "^dispatch-deepseek: refused — TASK §3 owns templates/claude-settings\.json, $ALLOW"
+  mkstd 'docs/' 'sh tests/owned-paths.t.sh'
+  sd_run "control: standards: a lane owning all of docs/ (docs/05 included) is refused before dispatch" 2 1 "^dispatch-deepseek: refused — TASK §3 owns docs/\*, $ALLOW"
+  mkstd 'docs/07-harness.md' 'scripts/verify/m0.sh --section web'
+  sd_run "control: standards: a §5 naming an instrument section instead of a judge is refused" 2 1 '^dispatch-deepseek: refused — TASK §5 names no judge \(sh tests/<name>\.t\.sh\)'
+  mkstd 'docs/07-harness.md' 'sh tests/nope.t.sh'
+  sd_run "control: standards: a §5 judge that does not exist at HEAD is refused" 2 1 "^dispatch-deepseek: refused — TASK §5 judge tests/nope\.t\.sh does not exist at $SWB\$"
+  # After the run (a stub claude first on PATH stands in for the model).
+  mkstd "$(printf 'docs/07-harness.md\nCHANGELOG.md')" 'sh tests/owned-paths.t.sh'
+  printf '#!/bin/sh\n%s\n' "echo 'exit 0' >> tests/owned-paths.t.sh && $SG commit -qam judge" > "$T/stub/claude"; chmod +x "$T/stub/claude"
+  sd_run "control: standards: a run that changes tests/owned-paths.t.sh is refused after the run" 1 0 "^dispatch-deepseek: lane changed a path $ALLOW" '^tests/owned-paths\.t\.sh$'
+  printf '#!/bin/sh\n%s\n' "echo '# x' >> templates/ci-caller.yml && $SG commit -qam ci" > "$T/stub/claude"
+  sd_run "control: standards: a run that changes templates/ci-caller.yml (not prose) is refused after the run" 1 0 "^dispatch-deepseek: lane changed a path $ALLOW" '^templates/ci-caller\.yml$'
+  printf '#!/bin/sh\n%s\n' "git mv bin/check docs/check.md && $SG commit -qm mv" > "$T/stub/claude"
+  sd_run "control: standards: a rename from bin/ into docs/ is refused after the run (both sides judged)" 1 0 "^dispatch-deepseek: lane changed a path $ALLOW" '^bin/check$'
+  printf '#!/bin/sh\n%s\n' "echo 'See [x](nowhere.md).' >> docs/07-harness.md && $SG commit -qam docs" > "$T/stub/claude"
+  sd_run "control: standards: a run that adds a broken link to docs/07 fails the docs judge" 1 0 '^dispatch-deepseek: docs judge failed' '^docs: FAIL docs/07-harness\.md:[0-9]+: broken relative link nowhere\.md$'
+  printf '#!/bin/sh\n%s\n' "echo x >> docs/05-domain-rules.md && $SG commit -qam d05" > "$T/stub/claude"
+  sd_run "control: standards: a run that changes docs/05-domain-rules.md is refused after the run (whatever §3 owned)" 1 0 "^dispatch-deepseek: lane changed a path $ALLOW" '^docs/05-domain-rules\.md$'
+  printf '#!/bin/sh\n%s\n' "ln -s 07-harness.md docs/x.md && git add docs/x.md && $SG commit -qm link" > "$T/stub/claude"
+  sd_run "control: standards: a run that commits a symlink docs/x.md is refused after the run" 1 0 '^dispatch-deepseek: lane committed a file mode other than 100644' '^120000 docs/x\.md$'
+  printf '#!/bin/sh\n%s\n' "echo x > docs/run.md && chmod +x docs/run.md && git add --chmod=+x docs/run.md && $SG commit -qm exe" > "$T/stub/claude"
+  sd_run "control: standards: a run that commits an executable docs/run.md (100755) is refused after the run" 1 0 '^dispatch-deepseek: lane committed a file mode other than 100644' '^100755 docs/run\.md$'
+  printf '#!/bin/sh\n%s\n' "git rm -q docs/07-harness.md && $SG commit -qm rm" > "$T/stub/claude"
+  sd_run "control: standards: deleting docs/07 that an unchanged doc links to fails the docs judge (every doc judged)" 1 0 '^dispatch-deepseek: docs judge failed' '^docs: FAIL docs/links\.md:2: broken relative link 07-harness\.md$'
+  printf '#!/bin/sh\n%s\n' "echo 'See [06](06-code-quality.md).' >> docs/07-harness.md && $SG commit -qam docs" > "$T/stub/claude"
+  sd_run "standards: a docs commit with green judges -> exit 0" 0 0 '^dispatch-deepseek: OK — new commit [0-9a-f]{40}, clean tree, every changed path in the docs allow-list, tests/owned-paths\.t\.sh and tests/docs\.t\.sh --judge green$'
+  git -C "$SD" worktree remove --force "$SW"
+else blk "standards docs lanes: $H is not a git checkout with the standards root commit $SROOT"; fi
+
 # --- 5c. reusable Rust CI: the application role (v0.1.16, game m2.2 A6) -----------------------------
 # A caller that ships scripts/db/app-role.sh gets the role created right after the migrations, before the tests; the
 # job env carries APP_DATABASE_URL beside DATABASE_URL. A static check of the file: the run itself needs a real PR.
