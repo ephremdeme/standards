@@ -3,7 +3,8 @@
 # fast-forward only, explicit refspec; every other request is refused for its own reason and pushes nothing.
 # No network: origin keeps its real URL git@github.com:ephremdeme/<repo>.git, and GIT_SSH_COMMAND (set here, in the
 # test's environment only) is a fake ssh that runs git-upload-pack / git-receive-pack against $T/<owner>-<repo>.git.
-# The root-commit table is replaced by PUSH_BRANCH_ROOTS_FILE (fixture roots; the script warns when it is set).
+# The root-commit table is replaced by PUSH_BRANCH_ROOTS_FILE (fixture roots; the script warns when it is set), except
+# in ONE case: roots(), extracted from the script and run alone (no push), must name game's real root commit.
 # Run: sh standards/tests/push-branch.t.sh   -> exit 0 when all cases behave.
 set -u
 S=$(cd "$(dirname "$0")/.." && pwd); PB="$S/bin/push-branch"; T=$(mktemp -d); R=0
@@ -32,7 +33,10 @@ D="$T/someoneelse-standards.git"; git init -q --bare -b main "$D"   # a decoy a 
 W="$T/w"; git init -q -b main "$W"; echo a > "$W/f"; git -C "$W" add f; git -C "$W" commit -qm one
 git -C "$W" remote add origin "$U"; git -C "$W" push -q origin refs/heads/main:refs/heads/main
 W=$(cd "$W" && pwd -P); WROOT=$(git -C "$W" rev-list --max-parents=0 main)
-printf 'standards %s\nexchange %s\nhub 1111111111111111111111111111111111111111\n' "$WROOT" "$WROOT" > "$T/roots"
+GROOT=5b469d2caa001c168e63498d32ad7637fee837f9   # game's real root commit (git -C <game> rev-list --max-parents=0 HEAD, 2026-10-06)
+printf 'standards %s\nexchange %s\nhub 1111111111111111111111111111111111111111\ngame %s\n' "$WROOT" "$WROOT" "$GROOT" > "$T/roots"
+printf 'game %s\n' "$WROOT" > "$T/roots-game"   # a fixture whose game row is this checkout's root (and no other row)
+G="$T/ephremdeme-game.git"; git init -q --bare -b main "$G"
 PUSH_BRANCH_ROOTS_FILE="$T/roots"; export PUSH_BRANCH_ROOTS_FILE
 commit_on(){ # commit_on <branch> <start> <file>: one commit on <branch> (created at <start> when new); W stays on main, clean
   if git -C "$W" rev-parse -q --verify "refs/heads/$1" >/dev/null; then git -C "$W" switch -q "$1"; else git -C "$W" switch -q -c "$1" "$2"; fi
@@ -71,7 +75,15 @@ check_ "control: ... the decoy repository got nothing" '[ -z "$(git -C "$D" for-
 git -C "$W" remote set-url origin git@github.com:ephremdeme/hub.git
 refused "a checkout pushed into another repository (origin pointed at hub)" 'opus/new does not descend from the root commit of ephremdeme/hub \(1111111111111111111111111111111111111111\)$' "$W" opus/new
 git -C "$W" remote set-url origin git@github.com:ephremdeme/game.git
-refused "a repository whose root commit is not in the table (game)" 'the root commit of ephremdeme/game is unknown here; push game from its own session$' "$W" opus/new
+refused "a checkout not from game's root whose origin says ephremdeme/game" "opus/new does not descend from the root commit of ephremdeme/game \\($GROOT\\)\$" "$W" opus/new
+check_ "control: ... the game repository got nothing" '[ -z "$(git -C "$G" for-each-ref)" ]'
+want "a checkout from the game row's root is pushed to ephremdeme/game (fixture game row = this root)" 0 "^push-branch: OK opus/new $(git -C "$W" rev-parse opus/new)\$" env PUSH_BRANCH_ROOTS_FILE="$T/roots-game" sh "$PB" "$W" opus/new
+check_ "... origin game has it at the local tip" '[ "$(remote_ref refs/heads/opus/new "$G")" = "$(git -C "$W" rev-parse opus/new)" ]'
+git -C "$W" remote set-url origin git@github.com:ephremdeme/hub.git
+want "control: a repository whose root commit is not in the table (fixture without a hub row) -> refused" 2 '^push-branch: refused — the root commit of ephremdeme/hub is unknown here; push hub from its own session$' env PUSH_BRANCH_ROOTS_FILE="$T/roots-game" sh "$PB" "$W" opus/new
+# The one case on the REAL table (PUSH_BRANCH_ROOTS_FILE unset): roots() alone, extracted from the script, never pushes.
+roots_fn=$(awk '/^roots\(\) \{/,/^}$/' "$PB")
+check_ "the real table: roots game prints exactly game's root commit $GROOT" '[ "$(env -u PUSH_BRANCH_ROOTS_FILE sh -c "$roots_fn; roots game" 2>&1)" = "$GROOT" ]'
 git -C "$W" remote set-url origin "$U"
 git -C "$W" replace "$(git -C "$W" rev-parse opus/new)" "$(git -C "$W" rev-parse main)"
 refused "a replace ref" "$W has replace refs \(refs/replace/[0-9a-f]{40}\)\$" "$W" opus/new
