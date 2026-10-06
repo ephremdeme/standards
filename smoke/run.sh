@@ -279,6 +279,8 @@ printf '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted 
 chmod +x "$T/df100/df" "$T/df7/df"; PATH="$T/df100:$PATH"; export PATH
 out=$(standards/bin/new-lane.sh ds/ui-button main); W="$T/game/.worktrees/ds-ui-button"
 ( unset DS_API_KEY; sh -c "$DD $W" ) >$T/o 2>&1; [ $? -eq 2 ] && grep -q "DS_API_KEY not set" $T/o && ok "dispatch-deepseek: refuses without a key" || bad "dispatch-deepseek key check"
+DS_API_KEY=dummy sh -c "$DD $W medium" >$T/o 2>&1; [ $? -eq 2 ] && grep -q "effort must be max or high, not 'medium'" $T/o && ok "dispatch-deepseek: refuses an effort other than max or high" || bad "dispatch-deepseek effort check"
+grep -q '^wt=.*effort=\${2:-max}$' "$DD" && grep -q 'EFFORT_LEVEL="\${DS_EFFORT:-max}"' "$T/game/standards/templates/deepseek.sh" && ok "dispatch-deepseek and templates/deepseek.sh default to max effort" || bad "DeepSeek effort default is not max in both entry points"
 DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $W" >$T/o 2>&1; [ $? -eq 2 ] && grep -q "not Risk: LOW" $T/o && ok "dispatch-deepseek: refuses a lane not marked Risk: LOW" || bad "dispatch-deepseek risk check"
 # The smoke writes the lane's TASK itself: header lines 1-3 with a full base sha, headings 1-7, the owned-paths block in
 # §3 and a §5 naming the instrument section (task-lint, C7).
