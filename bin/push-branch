@@ -7,8 +7,8 @@
 #     IT (`git remote get-url --all origin` and `--push --all`, i.e. after url.<base>.insteadOf / pushInsteadOf) is
 #     github.com[:/]ephremdeme/<name>[.git] (https://, git@ or ssh://git@), one <name> in exchange, standards, game, hub;
 #     and the pushed ref descends from that repository's root commit (the table in roots() below), so a checkout of
-#     one repository cannot be pushed into another. game's root is not in the table yet: game is refused here (push
-#     it from the game session) until a game session adds it.
+#     one repository cannot be pushed into another (all four repositories have a row; game's was added for exchange
+#     D-089).
 #  2. no tracked change in the working tree or the index (git status --porcelain --untracked-files=no is empty);
 #  3. <ref> is a branch integration/<x>, opus/<x>, fable/<x> or ds/<x> (<x> = [a-z0-9][a-z0-9._-]*, a valid ref name)
 #     or a tag vN.N.N; never main, master or HEAD, nothing containing ":", "+", ".." or whitespace;
@@ -42,6 +42,7 @@ roots() { # roots <name>: the root commit of ephremdeme/<name> (read from the fo
     exchange) echo f15713f1b3261a4cc1d0e563230a6d8aa32f7d82;;
     standards) echo 4e78d67036ddafaa07c9dac9bb74249c4dd2e895;;
     hub) echo 75422b757cdc5cc37efb54035fac7aeea17da33e;;
+    game) echo 5b469d2caa001c168e63498d32ad7637fee837f9;;
     *) ;;
   esac
 }
