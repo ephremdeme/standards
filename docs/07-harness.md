@@ -25,7 +25,7 @@
    - **CI:** pull requests run the chain in parallel section groups (D-087); a milestone PR also needs the full sequential chain green on its exact head (`gh workflow run nightly --ref integration/mN`), which is the `full chain:` evidence (D-088 item 8).
    - **Trust boundary:** the close report lists the trust-boundary files changed; the risk-gate workflow is retired and `classify-risk` stays a pre-dispatch aid (D-085 item 3).
    - **Merge:** non-milestone PRs on green CI with `--match-head-commit`; milestone PRs through `merge-pr --milestone` (D-088 item 7, D-089).
-9. **WIP limit:** at most 3 lanes running at once across the workspace, at most 2 in one repo. `new-lane.sh` refuses beyond that.
+9. **WIP limit:** at most 5 lanes running at once across the workspace, at most 2 in one repo. `new-lane.sh` refuses beyond that.
 10. **Decide, don't escalate.** Only decisions with lasting consequences go to founders, **max 4 per batch**, options weighed, recommendation first (`NOTES.md`). Everything else: decide, log in `DECISIONS.md`, build.
 11. **State lives in files** (D-085 item 6): `DECISIONS.md` (append-only, read by grep), `NOTES.md` "Where we are" at most ~60 lines, `BACKLOG.md`, lane and close reports in `docs/md-reports/` (≤120 lines). At every close the recurring finding classes become rules: docs/06 "Never", the TASK template's §4, and the instrument where a check can express them.
 12. **Lane economy:**

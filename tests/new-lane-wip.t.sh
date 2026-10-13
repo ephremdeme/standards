@@ -1,5 +1,5 @@
 #!/bin/sh
-# Negative control for bin/new-lane.sh's WIP limit (docs/07 §2 7b): a 3rd lane in one repo and a 4th across the
+# Negative control for bin/new-lane.sh's WIP limit (docs/07 §2 item 9): a 3rd lane in one repo and a 6th across the
 # workspace must be refused FOR THEIR OWN REASON (exit 1 + "wip limit: …"), never 2 (usage) or 126/127.
 # Invalid branch names are refused with exit 2 before anything is created (retro review 17).
 # Run: sh standards/tests/new-lane-wip.t.sh   -> exit 0 when all cases behave.
@@ -10,11 +10,12 @@ want(){ # want <label> <rc> <regex> <cmd...>
   label=$1; rc_want=$2; re=$3; shift 3; out=$("$@" 2>&1); rc=$?
   if [ "$rc" -eq "$rc_want" ] && printf '%s' "$out" | grep -Eq -- "$re"; then ok "$label"; else bad "$label (rc=$rc want $rc_want, /$re/)"; printf '%s\n' "$out" | tail -n 4 | sed 's/^/        /'; fi; }
 export GIT_CONFIG_GLOBAL=/dev/null GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
-# A workspace with two product repos, each carrying a plain copy of standards (templates and bin are what the script needs).
+# A workspace with three product repos (the workspace limit 5 needs 2 + 2 + 1 lanes under the per-repo limit 2), each
+# carrying a plain copy of standards (templates and bin are what the script needs).
 mk_repo(){ git init -q -b main "$1"; cp -r "$S" "$1/standards"; rm -rf "$1/standards/.git"; printf '.worktrees/\n.env\n' > "$1/.gitignore"
   printf 'DATABASE_URL=postgres://placeholder\n' > "$1/.env.example"; printf '[package]\nname = "x"\nversion = "0.0.0"\n' > "$1/Cargo.toml"
   git -C "$1" add -A; git -C "$1" commit -qm base; }
-mk_repo "$T/a"; mk_repo "$T/b"
+mk_repo "$T/a"; mk_repo "$T/b"; mk_repo "$T/c"
 NL="standards/bin/new-lane.sh"
 lane(){ (cd "$1" && sh "$NL" "$2" main); }
 # Retro review 17: a branch name is validated before anything else (sed replacement metacharacters, option-looking names).
@@ -31,7 +32,10 @@ want "repo a: lane 2 accepted" 0 'branch: opus/two' lane "$T/a" opus/two
 want "control: repo a lane 3 refused (per-repo limit 2)" 1 'wip limit: 2 lanes already in .*(max 2 per repo)' lane "$T/a" opus/three
 [ -d "$T/a/.worktrees/opus-three" ] && bad "refused lane still created a worktree" || ok "refused lane created nothing"
 want "repo b: lane 1 accepted (3 across the workspace)" 0 'branch: ds/one' lane "$T/b" ds/one
-want "control: repo b lane 2 refused (workspace limit 3)" 1 'wip limit: 3 lanes already across .*(max 3 per workspace)' lane "$T/b" ds/two
+want "repo b: lane 2 accepted (4 lanes across the workspace accepted)" 0 'branch: ds/two' lane "$T/b" ds/two
+want "repo c: lane 1 accepted (5 across the workspace: 4 existing is below the limit)" 0 'branch: fable/one' lane "$T/c" fable/one
+want "control: repo c lane 2 refused (workspace limit 5; repo c holds 1)" 1 'wip limit: 5 lanes already across .*(max 5 per workspace)' lane "$T/c" fable/two
+[ -d "$T/c/.worktrees/fable-two" ] && bad "refused workspace lane still created a worktree" || ok "refused workspace lane created nothing"
 git -C "$T/a" worktree remove --force .worktrees/opus-two
-want "after removing a lane in repo a, repo b lane 2 accepted" 0 'branch: ds/two' lane "$T/b" ds/two
+want "after removing a lane in repo a, repo c lane 2 accepted" 0 'branch: fable/two' lane "$T/c" fable/two
 rm -rf "$T"; [ $R -eq 0 ] && echo "new-lane-wip.t: all cases behave" || echo "new-lane-wip.t: FAILURES"; exit $R
