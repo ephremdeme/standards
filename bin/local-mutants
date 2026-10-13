@@ -17,7 +17,8 @@
 # mutants.out/{caught,missed,unviable,timeout}.txt; tested is their sum and must equal `cargo mutants --list` for the
 # same selection (a listing of 0 skips the run). Exactly one line goes to stdout and to <clone>/mutants-run.txt (C4
 # format, BACKLOG 40; unviable and timeout are never caught); everything else goes to stderr:
-#   run: <sha> files: <f1>,<f2>,... tested: <t> missed: <m> caught: <c> unviable: <u> timeout: <k>
+#   run: <sha> files: <f1> <f2> ... tested: <t> missed: <m> caught: <c> unviable: <u> timeout: <k>
+# The names are space-separated, as the exchange's mutants ledger prints them and its instrument splits them.
 # Exit 0 iff missed + timeout = 0 and cargo mutants exited 0. Exit 1 with the line: survivors (missed or timeout).
 # Exit 1 without it: an incomplete run (tested != listed), cargo mutants failing (--list, a red baseline, any exit
 # other than 0/2/3, an exit 2/3 its outcome files contradict), missing outcome files, mutants-run.txt unwritable.
@@ -80,11 +81,12 @@ sha=$(git -C "$clone" rev-parse HEAD) || fail "git rev-parse HEAD failed in $clo
 out=$(mktemp -d "${TMPDIR:-/tmp}/local-mutants.XXXXXX") || fail "mktemp failed"
 git -C "$clone" diff --no-color --no-ext-diff "$base" HEAD -- "$crate/src" > "$out/changes.diff" || fail "git diff $base HEAD failed in $clone"
 names=$(git -C "$clone" diff --no-color --name-only --diff-filter=d "$base" HEAD -- "$crate/src") || fail "git diff --name-only failed in $clone"
-# git quotes an unusual name ("..."), so a quoted .rs name is caught here too, never silently dropped.
+# git quotes an unusual name ("..."), so a quoted .rs name is caught here too, never silently dropped; with only these
+# characters a name holds no space, so the space-separated list splits back into exactly its names.
 rs=$(printf '%s\n' "$names" | grep -E '\.rs"?$')
 odd=$(printf '%s\n' "$rs" | grep -vE '^[A-Za-z0-9_./-]+$' | head -n 1)
 [ -z "$odd" ] || refuse "the changed file '$odd' has a name the run: line cannot carry (only A-Z a-z 0-9 _ . / -)"
-files=$(printf '%s\n' "$rs" | grep -E "^$crate/src/.+\.rs\$" | sort | paste -s -d, -)
+files=$(printf '%s\n' "$rs" | grep -E "^$crate/src/.+\.rs\$" | sort | paste -s -d ' ' -)
 [ -n "$files" ] || refuse "no $crate/src/**/*.rs file changed in $base..HEAD; nothing to mutate"
 scope() { systemd-run --user --scope -p "MemoryMax=$mm" -p MemorySwapMax=0 -- "$@"; }
 if ! scope true > "$out/scope-probe.log" 2>&1; then

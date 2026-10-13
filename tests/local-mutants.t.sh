@@ -80,7 +80,7 @@ printf '#!/bin/sh\nexit 0\n' > "$T/sys/true"; chmod +x "$T/sys/true"   # the sco
 PATH="$T/bin:$T/sys"; export PATH
 [ "$(command -v systemd-run)" = "$T/bin/systemd-run" ] && ! command -v cargo >/dev/null && ! command -v sccache >/dev/null \
   || { echo "FAIL    PATH reaches a cargo or sccache, or not the stub systemd-run; aborting"; rm -rf "$T"; exit 1; }
-FILES=ledger/src/lib.rs,ledger/src/model.rs,ledger/src/new.rs
+FILES='ledger/src/lib.rs ledger/src/model.rs ledger/src/new.rs'   # space-separated, as the C4 ledger prints and e3.sh parses it
 reset_stub(){ rm -rf "$STUB"/* "$C/mutants-run.txt"; }
 lm(){ "$@" > "$T/out" 2> "$T/err"; lrc=$?; }   # lm <cmd...>: stdout and stderr apart, the exit code in $lrc
 runline(){ # runline <tested> <missed> <caught> <unviable> <timeout>: the exact run: line for the clone's head
