@@ -3,3 +3,15 @@
 [build]
 # memory-safe value for the 8 GB / 4-core build box, measured: PENDING (coordinator): peak RSS of a cold cargo build --workspace --all-targets; CI overrides with CARGO_BUILD_JOBS
 jobs = 2
+
+# Faster links for the test binaries, which dominate incremental builds (founder 2026-10-13, local-first gate D-109):
+# the mold linker through gcc >= 12 (`apt install mold`; Ubuntu 24.04 ships gcc 13). No mold on the box = every link
+# fails, loudly, so a repo takes this file only after `command -v mold` succeeds there. Changing rustflags rebuilds
+# every crate once (sccache then serves the rest).
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+# Line tables only: enough for panics and backtraces with file:line, a fraction of full debuginfo to write and link.
+# Tests inherit `dev`. Release is untouched.
+[profile.dev]
+debug = "line-tables-only"
