@@ -10,7 +10,7 @@ permissions:
   contents: read
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: postgres:17
@@ -57,7 +57,7 @@ jobs:
   # hashFiles() is not available in a job-level `if` (no checkout exists there yet), so each step after the checkout
   # carries the condition; a repository without web/package.json gets a green no-op job.
   web:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults: { run: { working-directory: web } }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -80,7 +80,7 @@ jobs:
   # Secret scan with the pinned gitleaks CLI (retro review 10): no action licence, no secrets, so it also runs on
   # pull requests from forks. Pull requests: the PR's own commits (base..head); merge_group and push: the last 50.
   secrets:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
