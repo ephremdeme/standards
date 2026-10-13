@@ -6,11 +6,12 @@
 # still ends in gate-head, gate-tree and its red gate-verdict. A second fixture carries the game's instrument ids (m1_1,
 # m2_1, m2_2); at the end the gate's own red and green logs go through bin/merge-pr --local-log with a stub gh (the
 # review's blocker, end to end).
+# A third fixture holds the exchange's instrument ids (m0, e1, e2, e9, e10) for the newest-instrument rule.
 # Run: sh standards/tests/local-gate.t.sh   -> exit 0 when all cases behave.
 set -u
 S=$(cd "$(dirname "$0")/.." && pwd); LG="$S/bin/local-gate"; T=$(mktemp -d); R=0
 TMPDIR=$T; export TMPDIR
-unset BUILD_LOCK_TOKEN BUILD_LOCK_WAIT CARGO_TARGET_DIR RUSTC_WRAPPER VERIFY_FAIL_TAIL
+unset BUILD_LOCK_TOKEN BUILD_LOCK_WAIT CARGO_TARGET_DIR RUSTC_WRAPPER VERIFY_FAIL_TAIL LOCAL_GATE_INSTRUMENT_OVERRIDE
 ok(){ echo "PASS    $1"; }; bad(){ echo "FAIL    $1"; R=1; }
 want(){ # want <label> <rc> <regex> <cmd...>
   label=$1; rc_want=$2; re=$3; shift 3; out=$("$@" 2>&1); rc=$?
@@ -165,4 +166,23 @@ want "end to end: the gate's red log 'the instrument prints a green line but exi
 check_ "... no merge call" '[ ! -e "$T/merge" ]'
 want "end to end: the gate's green log -> merge-pr --local-log merges" 0 "^merge-pr: OK ephremdeme/exchange#12 $HD merged\$" mp "$LGREEN"
 check_ "... exactly the guarded merge call" '[ "$(cat "$T/merge" 2>/dev/null)" = "pr merge 12 --repo ephremdeme/exchange --merge --match-head-commit $HD" ]'
+# The newest instrument (review minor): <mN> is refused unless no scripts/verify/<id>.sh has a greater version (its
+# digit runs as numbers, left to right), or LOCAL_GATE_INSTRUMENT_OVERRIDE=1, which the log records. The exchange's
+# shape m0, e1, e2, plus e9 and e10, so that a string sort (e9 > e10) or a letter-first sort (m0 > e10, as sort -V
+# orders them) picks another one; e10_lib.sh has e10's version and e99-helper.sh is not an id, so neither outranks e10.
+PE="$T/exch"; git init -q -b main "$PE"; mkdir -p "$PE/standards/bin" "$PE/scripts/verify"; cp "$P/standards/bin/check" "$PE/standards/bin/"
+for i in m0 e1 e2 e9 e10 e10_lib e99-helper; do cp "$PG/scripts/verify/m2_2.sh" "$PE/scripts/verify/$i.sh"; done
+git -C "$PE" add -A; git -C "$PE" commit -qm exch; HE=$(git -C "$PE" rev-parse HEAD)
+NEWEST='LOCAL_GATE_INSTRUMENT_OVERRIDE=1 runs an older one'
+reset; nl
+want "control: m0 when e10 is newer (letters do not lead; sort -V would rank m0 last) -> refused" 2 "^local-gate: refused — m0 is not the newest instrument of $PE \(scripts/verify/e10\.sh is newer\); $NEWEST\$" sh "$LG" "$PE" m0 "$L"
+check_ "control: ... no log written" '[ ! -e "$L" ]'
+nl; want "control: e9 when e10 is newer (numbers compare as numbers; a string sort ranks e9 last) -> refused" 2 "^local-gate: refused — e9 is not the newest instrument of $PE \(scripts/verify/e10\.sh is newer\); $NEWEST\$" sh "$LG" "$PE" e9 "$L"
+nl; want "control: the game's m2_1 when m2_2 is newer -> refused" 2 "^local-gate: refused — m2_1 is not the newest instrument of $PG \(scripts/verify/m2_2\.sh is newer\); $NEWEST\$" sh "$LG" "$PG" m2_1 "$L"
+nl; want "control: LOCAL_GATE_INSTRUMENT_OVERRIDE=yes -> refused" 2 "^local-gate: refused — LOCAL_GATE_INSTRUMENT_OVERRIDE must be 1 or unset, got 'yes'\$" env LOCAL_GATE_INSTRUMENT_OVERRIDE=yes sh "$LG" "$PE" e1 "$L"
+check_ "control: ... no log written" '[ ! -e "$L" ]'
+nl; want "green: e10, the newest (e10_lib.sh the same version, e99-helper.sh not an id) -> exit 0" 0 "^local-gate: OK e10 $HE $L\$" sh "$LG" "$PE" e10 "$L"
+check_ "... no gate-instrument line without the override" '! grep -q "^gate-instrument:" "$L" && [ "$(tail -n 1 "$L")" = "gate-verdict: green e10" ]'
+nl; want "override: LOCAL_GATE_INSTRUMENT_OVERRIDE=1 runs the older e1 -> exit 0" 0 "^local-gate: OK e1 $HE $L\$" env LOCAL_GATE_INSTRUMENT_OVERRIDE=1 sh "$LG" "$PE" e1 "$L"
+check_ "... the log records gate-instrument: e1 (override) right after free -m and ends with gate-verdict: green e1" '[ "$(sed -n 2p "$L")" = "gate-instrument: e1 (override)" ] && [ "$(grep -c "^gate-instrument:" "$L")" -eq 1 ] && [ "$(tail -n 1 "$L")" = "gate-verdict: green e1" ]'
 reset; rm -rf "$T"; [ $R -eq 0 ] && echo "local-gate.t: all cases behave" || echo "local-gate.t: FAILURES"; exit $R

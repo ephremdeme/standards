@@ -17,9 +17,15 @@
 # gate-head.
 # Refused (exit 2, "local-gate: refused — <reason>", nothing run and no log written) unless: <mN> matches
 # ^[a-z][a-z0-9_]*$ (a lowercase letter, then lowercase letters, digits or _: the game's m2_2 too); VERIFY_FAIL_TAIL is
-# a positive integer; <repo-dir> is the top level of a git checkout with a commit and `git status` reads it; its tree
-# is clean apart from an untracked TASK.md at the top (the first other status line is named); standards/bin/check and
-# scripts/verify/<mN>.sh exist; <log> does not exist (not even as a dangling link) and can be created.
+# a positive integer; LOCAL_GATE_INSTRUMENT_OVERRIDE is 1 or unset; <repo-dir> is the top level of a git checkout
+# with a commit and `git status` reads it; its tree is clean apart from an untracked TASK.md at the top (the first
+# other status line is named); standards/bin/check and scripts/verify/<mN>.sh exist; no scripts/verify/<id>.sh is
+# newer than <mN> (below); <log> does not exist (not even as a dangling link) and can be created.
+# The newest instrument, so a lane PR is always backed by the current chain: an id's version is its digit runs read as
+# numbers, left to right (letters and _ only separate them; a shorter version is the lower: m2 < m2_1), so e10 > e9 >
+# e2 > e1 > m0 and m2_2 > m2_1 > m1_1; <mN> is refused when an id (a .sh name matching the id rule) has a greater
+# version, an equal version is not newer. LOCAL_GATE_INSTRUMENT_OVERRIDE=1 skips this rule and writes
+# "gate-instrument: <mN> (override)" into the log right after free -m.
 # Exit 0, "local-gate: OK <mN> <sha> <log>", only if HEAD did not move, the tree is clean at the end, check printed
 # "check: OK" and no "check: FAILED" and exited 0, the log has no "[FAIL]" line and no verify line with a failed count
 # above 0, it has a line "verify:<mN> — N ok, 0 failed" with N >= 1, and the instrument exited 0. Otherwise exit 1,
@@ -37,6 +43,8 @@ case "$ms" in ''|[!a-z]*|*[!a-z0-9_]*) refuse "'$ms' is not a milestone id (a lo
 VERIFY_FAIL_TAIL=${VERIFY_FAIL_TAIL:-400}
 case "$VERIFY_FAIL_TAIL" in 0*|*[!0-9]*) refuse "VERIFY_FAIL_TAIL must be a positive integer, got '$VERIFY_FAIL_TAIL'";; esac
 export VERIFY_FAIL_TAIL
+override=${LOCAL_GATE_INSTRUMENT_OVERRIDE-}
+case "$override" in ''|1) ;; *) refuse "LOCAL_GATE_INSTRUMENT_OVERRIDE must be 1 or unset, got '$override'";; esac
 nottop() { refuse "$dir is not the top level of a git checkout with a commit"; }
 [ -d "$dir" ] || nottop
 top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) && [ -n "$top" ] || nottop
@@ -48,11 +56,29 @@ dirt=$(printf '%s\n' "$st" | grep -vx '?? TASK.md' | grep . | head -n 1)
 [ -z "$dirt" ] || refuse "the tree of $dir is not clean (first: ${dirt#???})"
 [ -f "$dir/standards/bin/check" ] || refuse "$dir has no standards/bin/check"
 [ -f "$dir/scripts/verify/$ms.sh" ] || refuse "$dir has no scripts/verify/$ms.sh"
+# The newest instrument: awk keys each id by its digit runs (leading zeros dropped, each run as its length in 3 digits,
+# then the digits, then "."), so a byte comparison of keys orders the versions; it prints <mN> when no key is greater,
+# else the first id with the greatest key. An empty answer (awk or the listing failed) refuses.
+if [ "$override" != 1 ]; then
+  newer=$(for f in "$dir"/scripts/verify/*.sh; do
+      b=${f##*/}; b=${b%.sh}
+      case "$b" in ''|[!a-z]*|*[!a-z0-9_]*) continue;; esac
+      if [ -f "$f" ]; then printf '%s\n' "$b"; fi
+    done | awk -v ms="$ms" '
+      function key(s,  k, d) { k = ""
+        while (match(s, /[0-9]+/)) { d = substr(s, RSTART, RLENGTH); sub(/^0+/, "", d); k = k sprintf("%03d", length(d)) d "."; s = substr(s, RSTART + RLENGTH) }
+        return k }
+      { k = key($0); if (NR == 1 || k > top) { top = k; id = $0 } }
+      END { if (NR > 0) print ((key(ms) "") == (top "") ? ms : id) }')
+  [ -n "$newer" ] || refuse "cannot order the instruments in $dir/scripts/verify"
+  [ "$newer" = "$ms" ] || refuse "$ms is not the newest instrument of $dir (scripts/verify/$newer.sh is newer); LOCAL_GATE_INSTRUMENT_OVERRIDE=1 runs an older one"
+fi
 if [ -e "$log" ] || [ -L "$log" ]; then refuse "$log exists; the gate writes a fresh log only"; fi
 # noclobber: the log is created here or not at all, never truncated.
 ( set -C; : > "$log" ) 2>/dev/null || refuse "cannot create the log $log"
 red() { echo "local-gate: RED $ms $head — $1 (log $log)" >&2; exit 1; }
 free -m >> "$log" 2>&1 || echo "local-gate: free -m failed (exit $?)" >> "$log"
+if [ "$override" = 1 ]; then printf 'gate-instrument: %s (override)\n' "$ms" >> "$log" || red "the log could not be written"; fi
 ( cd "$dir" && sh "$here/with-build-lock" sh standards/bin/check ) < /dev/null >> "$log" 2>&1; crc=$?
 ( cd "$dir" && bash "scripts/verify/$ms.sh" ) < /dev/null >> "$log" 2>&1; irc=$?
 end=$(git -C "$dir" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || end=unreadable
