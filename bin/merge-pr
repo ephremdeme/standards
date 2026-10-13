@@ -1,11 +1,13 @@
 #!/bin/sh
-# Usage: standards/bin/merge-pr <owner/repo> <pr> <full-head-sha> [--smoke-log <path>] [--milestone <mN> [--residual D-NNN]]
+# Usage: standards/bin/merge-pr <owner/repo> <pr> <full-head-sha> [--smoke-log <path> | --local-log <path>]
+#          [--milestone <mN> [--residual D-NNN]]
 # The integrator's only merge path (exchange D-086; D-088 item 7 is its milestone checklist). Merges PR <pr> into main
 # with `gh pr merge <pr> --repo <r> --merge --match-head-commit <sha>`, so GitHub refuses if the head moved after the
-# checks below. Every fact is read from GitHub at the exact SHA (no local checkout is trusted). Refused (exit 2,
-# "merge-pr: refused — <reason>") unless ALL hold:
+# checks below. Every fact except the integrator-attested --smoke-log/--local-log file is read from GitHub at the exact
+# SHA (no local checkout is trusted). Refused (exit 2, "merge-pr: refused — <reason>") unless ALL hold:
 #  1. <full-head-sha> is 40 lowercase hex; <owner/repo> is ephremdeme/{exchange,standards,game} (ephremdeme/hub has no
-#     CI and is refused); <pr> is a number.
+#     CI and is refused); <pr> is a number; --smoke-log only for standards, --local-log only for exchange and game,
+#     never both.
 #  2. gh pr view: state OPEN, not a draft, not from another repository (isCrossRepository), headRefOid = <sha>,
 #     baseRefName = main. A head branch integration/<mN> requires --milestone <mN>; --milestone requires that branch.
 #  3. Check runs on that exact SHA (gh api --paginate .../commits/<sha>/check-runs; every page read, the count equal to
@@ -17,6 +19,17 @@
 #     none starting FAIL, and smoke-head lines that all read "smoke-head: <sha>" (at least one). The integrator runs the
 #     smoke on that head and appends the line itself (printf 'smoke-head: %s\n' "$(git rev-parse HEAD)" >> log): this
 #     evidence is integrator-attested, bound to the SHA, not independent.
+#     exchange and game with --local-log <path> (D-109: GitHub-hosted Actions dropped; the log is bin/local-gate's):
+#     the log replaces this whole step, so neither the check runs nor the legacy status is read. A readable, non-empty
+#     file with no line starting "check: FAILED", none starting "[FAIL]", none matching "^verify:.* [1-9][0-9]*
+#     failed$"; >= 1 line "check: OK"; >= 1 line "verify:<id> — N ok, 0 failed" (<id> ^[a-z][a-z0-9_]*$ as the game's
+#     m2_2, N >= 1, the em dash U+2014 as the instruments print it); >= 1 gate-head line and every one exactly
+#     "gate-head: <sha>"; >= 1 gate-tree line and every one exactly "gate-tree: clean"; no line starting "gate-verdict:
+#     red" and exactly one line starting "gate-verdict:", which is "gate-verdict: green <id>", with a passing
+#     "verify:<id> — N ok, 0 failed" line for that same <id> (chained instruments print green verify lines of their own
+#     before the outer run fails, so only local-gate's verdict says the gate passed). Integrator-attested like the smoke
+#     log, bound to the SHA by gate-head. Without --local-log exchange and game keep the check-runs path above (a
+#     self-hosted runner can revive it).
 #  4. The label founder-approved is required for a milestone PR (head integration/*) and for any PR whose files
 #     (gh api --paginate .../pulls/<pr>/files, as many as changedFiles) include .github/**, .claude/** or a CODEOWNERS
 #     file (also as a rename's previous name). Label timing: the newest entry of the branch's activity
@@ -26,7 +39,10 @@
 #     settings deny agents `gh pr edit`, `gh pr review`, `gh pr comment`, `gh label` and raw `gh api` writes, so only
 #     the founder applies labels. This script never writes to GitHub except the merge itself.
 #  5. --milestone <mN> (D-088 item 7):
-#     a. a nightly.yml run whose head_sha = <sha> has job(s) named chain, every one completed with success;
+#     a. a nightly.yml run whose head_sha = <sha> has job(s) named chain, every one completed with success; with
+#        --local-log instead (D-109; the nightly runs are not read): the log's gate verdict, checked as in 3, is
+#        "gate-verdict: green <mN>" (so its passing "verify:<mN> — N ok, 0 failed" line too), so the same log is the
+#        full-chain evidence;
 #     b. docs/md-reports/<mN>-milestone-review.md at <sha> (contents API, base64) carries "codex-last-read: <X>" (one
 #        value, 40 hex) where X = <sha>, or GitHub's compare X...<sha> is "ahead" and lists only that review file (a
 #        commit cannot contain its own SHA, so the commit recording Codex's review is the one change allowed after X);
@@ -44,14 +60,15 @@ GIT_NO_REPLACE_OBJECTS=1; export GIT_NO_REPLACE_OBJECTS
 unset GH_HOST GH_REPO
 GH_PROMPT_DISABLED=1; export GH_PROMPT_DISABLED
 refuse() { echo "merge-pr: refused — $1" >&2; exit 2; }
-usage() { echo "merge-pr: usage: merge-pr <owner/repo> <pr> <full-head-sha> [--smoke-log <path>] [--milestone <mN> [--residual D-NNN]]" >&2; exit 2; }
+usage() { echo "merge-pr: usage: merge-pr <owner/repo> <pr> <full-head-sha> [--smoke-log <path> | --local-log <path>] [--milestone <mN> [--residual D-NNN]]" >&2; exit 2; }
 [ $# -ge 3 ] || usage
 r=$1; pr=$2; sha=$3; shift 3
-ms=; ms_set=0; smoke=; smoke_set=0; resid=; resid_set=0
+ms=; ms_set=0; smoke=; smoke_set=0; resid=; resid_set=0; llog=; llog_set=0
 while [ $# -gt 0 ]; do
   case $1 in
     --milestone) [ $# -ge 2 ] && [ $ms_set -eq 0 ] || usage; ms=$2; ms_set=1; shift 2;;
     --smoke-log) [ $# -ge 2 ] && [ $smoke_set -eq 0 ] || usage; smoke=$2; smoke_set=1; shift 2;;
+    --local-log) [ $# -ge 2 ] && [ $llog_set -eq 0 ] || usage; llog=$2; llog_set=1; shift 2;;
     --residual) [ $# -ge 2 ] && [ $resid_set -eq 0 ] || usage; resid=$2; resid_set=1; shift 2;;
     *) usage;;
   esac
@@ -63,7 +80,10 @@ case "$sha" in *[!0-9a-f]*|'') refuse "$sha is not a full 40-character lowercase
 case "$r" in ephremdeme/exchange|ephremdeme/standards|ephremdeme/game) ;; *) refuse "$r is not ephremdeme/{exchange,standards,game}";; esac
 case "$pr" in ''|0*|*[!0-9]*) refuse "$pr is not a PR number";; esac
 [ $resid_set -eq 0 ] || [ $ms_set -eq 1 ] || refuse "--residual applies to milestone PRs only"
+[ $smoke_set -eq 0 ] || [ $llog_set -eq 0 ] || refuse "--local-log and --smoke-log cannot be given together"
 [ $smoke_set -eq 0 ] || [ "$r" = ephremdeme/standards ] || refuse "--smoke-log applies to ephremdeme/standards only"
+[ $llog_set -eq 0 ] || [ "$r" != ephremdeme/standards ] \
+  || refuse "--local-log applies to ephremdeme/exchange and ephremdeme/game only (ephremdeme/standards uses --smoke-log)"
 if [ $ms_set -eq 1 ]; then
   case "$ms" in [a-z]*[0-9]*) ;; *) refuse "$ms is not a milestone id";; esac
   case "$ms" in *[!a-z0-9.]*|*.|*..*) refuse "$ms is not a milestone id";; esac
@@ -116,7 +136,8 @@ case "$hb" in
     need_fa="milestone branch $hb";;
   *) [ $ms_set -eq 0 ] || refuse "--milestone $ms does not match the head branch $hb (integration/$ms expected)";;
 esac
-# 3. Checks on the exact SHA (pinned names per repository), or the standards smoke log; then the legacy status.
+# 3. Checks on the exact SHA (pinned names per repository), or the standards smoke log, then the legacy status; or the
+# local gate log alone (exchange, game).
 if [ "$r" = ephremdeme/standards ]; then
   [ $smoke_set -eq 1 ] || refuse "ephremdeme/standards has no PR CI: --smoke-log <path> is required"
   [ -f "$smoke" ] && [ -r "$smoke" ] || refuse "smoke log $smoke is not a readable file"
@@ -127,6 +148,43 @@ if [ "$r" = ephremdeme/standards ]; then
   [ "$nhead" -ge 1 ] || refuse "smoke log $smoke has no smoke-head line"
   other=$(grep -- '^smoke-head:' "$smoke" | grep -vx -- "smoke-head: $sha" | head -n 1)
   [ -z "$other" ] || refuse "smoke log $smoke is for $(printf '%s' "${other#smoke-head:}" | tr -d ' '), not $sha"
+elif [ $llog_set -eq 1 ]; then
+  [ -f "$llog" ] && [ -r "$llog" ] || refuse "local log $llog is not a readable file"
+  [ -s "$llog" ] || refuse "local log $llog is empty"
+  lcount() { c=$(grep -c -E -- "$1" "$llog"); [ $? -le 1 ] || refuse "local log $llog could not be read"; echo "$c"; }
+  lmatch() { f=$(grep -E -- "$1" "$llog"); [ $? -le 1 ] || refuse "local log $llog could not be read"; printf '%s\n' "$f"; }
+  n=$(lcount '^check: FAILED') || exit 2; [ "$n" -eq 0 ] || refuse "local log $llog has $n check: FAILED line(s)"
+  n=$(lcount '^\[FAIL\]') || exit 2; [ "$n" -eq 0 ] || refuse "local log $llog has $n [FAIL] line(s)"
+  vbad=$(lmatch '^verify:.* [1-9][0-9]* failed$') || exit 2
+  [ -z "$vbad" ] || refuse "local log $llog has $(printf '%s\n' "$vbad" | wc -l | tr -d ' ') verify line(s) with failures (first: $(printf '%s\n' "$vbad" | head -n 1))"
+  n=$(lcount '^check: OK$') || exit 2; [ "$n" -ge 1 ] || refuse "local log $llog has no check: OK line"
+  # The passing verify lines: ids as local-gate's, N >= 1 (a number with a non-zero digit), exactly the em dash.
+  vok=$(lmatch '^verify:[a-z][a-z0-9_]* — [0-9]*[1-9][0-9]* ok, 0 failed$') || exit 2
+  [ -n "$vok" ] || refuse "local log $llog has no passing verify line (verify:<id> — N ok, 0 failed with N >= 1)"
+  heads=$(lmatch '^gate-head:') || exit 2
+  [ -n "$heads" ] || refuse "local log $llog has no gate-head line"
+  other=$(printf '%s\n' "$heads" | grep -vx -- "gate-head: $sha" | head -n 1)
+  if [ -n "$other" ]; then
+    ov=${other#gate-head: }
+    case "$ov" in *[!0-9a-f]*|'') ov=;; esac
+    [ ${#ov} -eq 40 ] || refuse "local log $llog has a gate-head line that is not 'gate-head: <40 lowercase hex>': $other"
+    refuse "local log $llog is for $ov, not $sha"
+  fi
+  # The tree at the end of the gate: every gate-tree line is clean.
+  trees=$(lmatch '^gate-tree:') || exit 2
+  [ -n "$trees" ] || refuse "local log $llog has no gate-tree: clean line"
+  dirty=$(printf '%s\n' "$trees" | grep -vx -- 'gate-tree: clean' | head -n 1)
+  [ -z "$dirty" ] || refuse "local log $llog has $dirty, not gate-tree: clean"
+  # The gate's own verdict: no red one, exactly one verdict line, green, its id (kept for 5a) with a passing verify line.
+  vred=$(lmatch '^gate-verdict: red') || exit 2
+  [ -z "$vred" ] || refuse "local log $llog has a red gate verdict ($(printf '%s\n' "$vred" | head -n 1))"
+  vgreen=$(lmatch '^gate-verdict: green [a-z][a-z0-9_]*$') || exit 2
+  [ -n "$vgreen" ] || refuse "local log $llog has no gate-verdict: green line"
+  n=$(lcount '^gate-verdict:') || exit 2
+  [ "$n" -eq 1 ] || refuse "local log $llog has $n gate-verdict lines (exactly one gate-verdict: green <id> expected)"
+  vid=${vgreen#gate-verdict: green }
+  printf '%s\n' "$vok" | cut -d' ' -f1 | grep -Fqx -- "verify:$vid" \
+    || refuse "local log $llog has no verify:$vid — N ok, 0 failed line for its gate-verdict: green $vid"
 else
   pinned='["rust / check","rust / secrets","rust / web"]'
   case "$r" in ephremdeme/exchange) chain=true;; *) chain=false;; esac
@@ -154,11 +212,13 @@ else
     *) refuse "check runs on $sha: unreadable JSON";;
   esac
 fi
-gh_read "gh api commit status" "$tmp/status.json" api "repos/$r/commits/$sha/status"
-sv=$(jq -r 'if type == "object" and (.state | type) == "string" and (.total_count | type) == "number" then "\(.state)\t\(.total_count)" else error("x") end' "$tmp/status.json" 2>/dev/null) \
-  || refuse "commit status on $sha: unreadable JSON"
-s_state=$(printf '%s\n' "$sv" | cut -f1); s_count=$(printf '%s\n' "$sv" | cut -f2)
-[ "$s_count" = 0 ] || [ "$s_state" = success ] || refuse "commit status on $sha is $s_state ($s_count status(es))"
+if [ $llog_set -eq 0 ]; then
+  gh_read "gh api commit status" "$tmp/status.json" api "repos/$r/commits/$sha/status"
+  sv=$(jq -r 'if type == "object" and (.state | type) == "string" and (.total_count | type) == "number" then "\(.state)\t\(.total_count)" else error("x") end' "$tmp/status.json" 2>/dev/null) \
+    || refuse "commit status on $sha: unreadable JSON"
+  s_state=$(printf '%s\n' "$sv" | cut -f1); s_count=$(printf '%s\n' "$sv" | cut -f2)
+  [ "$s_count" = 0 ] || [ "$s_state" = success ] || refuse "commit status on $sha is $s_state ($s_count status(es))"
+fi
 # 4. The PR's files: .github/**, .claude/**, CODEOWNERS require founder-approved.
 gh_read "gh api pull files" "$tmp/files.json" api --paginate "repos/$r/pulls/$pr/files?per_page=100"
 fv=$(jq -rs --argjson n "$nfiles" 'if length == 0 or any(.[]; type != "array") or any(.[][]; type != "object" or (.filename | type) != "string") then "unreadable"
@@ -172,7 +232,7 @@ case "$fv" in
   incomplete*) refuse "PR #$pr lists $(printf '%s\n' "$fv" | cut -f2) of $nfiles changed files (incomplete)";;
   *) refuse "the files of PR #$pr are unreadable";;
 esac
-# 5. Milestone PRs (D-088 item 7): the full chain and Codex's last read, from GitHub at the SHA.
+# 5. Milestone PRs (D-088 item 7): the full chain (nightly.yml, or the local log) and Codex's last read (GitHub at the SHA).
 gh_content() { # gh_content <path> <outfile>: the file at <sha> from the contents API, base64-decoded
   gh_read "gh api contents of $1 at $sha" "$tmp/content.json" api "repos/$r/contents/$1?ref=$sha"
   b64=$(jq -r 'if type == "object" and .type == "file" and .encoding == "base64" and (.content | type) == "string" and (.content | length) > 0 then .content else error("x") end' "$tmp/content.json" 2>/dev/null) \
@@ -180,26 +240,31 @@ gh_content() { # gh_content <path> <outfile>: the file at <sha> from the content
   printf '%s\n' "$b64" | base64 -d >"$2" 2>/dev/null || refuse "contents of $1 at $sha: base64 decoding failed"
 }
 if [ $ms_set -eq 1 ]; then
-  # a. The full sequential chain on the exact head: every chain job of one run green.
-  gh_read "gh api nightly.yml runs" "$tmp/nightly.json" api --paginate "repos/$r/actions/workflows/nightly.yml/runs?head_sha=$sha&per_page=100"
-  runs=$(jq -rs --arg s "$sha" "$DEFS"' pages("workflow_runs") | if .err then error(.err) else
-      [.items[] | select(.head_sha == $s) | .id | if type == "number" and . == floor then . else error("id") end] | sort | reverse | .[] | tostring end' \
-      "$tmp/nightly.json" 2>/dev/null) || refuse "nightly.yml runs on $sha: unreadable or incomplete JSON"
-  [ -n "$runs" ] || refuse "no nightly.yml run on $sha"
-  seen=; chain_ok=0
-  for id in $runs; do
-    gh_read "gh api jobs of run $id" "$tmp/jobs.json" api --paginate "repos/$r/actions/runs/$id/jobs?per_page=100"
-    jv=$(jq -rs "$DEFS"' pages("jobs") | if .err then "err\t\(.err)" else [.items[] | select(.name == "chain")] as $c
-        | if ($c | length) == 0 then "no chain job"
-          elif all($c[]; .status == "completed" and .conclusion == "success") then "ok"
-          else [$c[] | "\(.status)/\(.conclusion)"] | join(",") end end' "$tmp/jobs.json" 2>/dev/null) || refuse "jobs of run $id: unreadable JSON"
-    case "$jv" in
-      ok) chain_ok=1; break;;
-      err*) refuse "jobs of run $id: $(printf '%s\n' "$jv" | cut -f2)";;
-    esac
-    seen="$seen${seen:+; }$id: $jv"
-  done
-  [ $chain_ok -eq 1 ] || refuse "no nightly.yml run on $sha has every chain job concluded success ($seen)"
+  # a. The full sequential chain on the exact head: every chain job of one run green; with a local gate log (D-109),
+  # its one green verdict names <mN> (3 bound the log to the head and the verdict to a passing verify:<mN> line).
+  if [ $llog_set -eq 1 ]; then
+    [ "$vid" = "$ms" ] || refuse "local log $llog has gate-verdict: green $vid, not $ms (the full chain of $ms is required)"
+  else
+    gh_read "gh api nightly.yml runs" "$tmp/nightly.json" api --paginate "repos/$r/actions/workflows/nightly.yml/runs?head_sha=$sha&per_page=100"
+    runs=$(jq -rs --arg s "$sha" "$DEFS"' pages("workflow_runs") | if .err then error(.err) else
+        [.items[] | select(.head_sha == $s) | .id | if type == "number" and . == floor then . else error("id") end] | sort | reverse | .[] | tostring end' \
+        "$tmp/nightly.json" 2>/dev/null) || refuse "nightly.yml runs on $sha: unreadable or incomplete JSON"
+    [ -n "$runs" ] || refuse "no nightly.yml run on $sha"
+    seen=; chain_ok=0
+    for id in $runs; do
+      gh_read "gh api jobs of run $id" "$tmp/jobs.json" api --paginate "repos/$r/actions/runs/$id/jobs?per_page=100"
+      jv=$(jq -rs "$DEFS"' pages("jobs") | if .err then "err\t\(.err)" else [.items[] | select(.name == "chain")] as $c
+          | if ($c | length) == 0 then "no chain job"
+            elif all($c[]; .status == "completed" and .conclusion == "success") then "ok"
+            else [$c[] | "\(.status)/\(.conclusion)"] | join(",") end end' "$tmp/jobs.json" 2>/dev/null) || refuse "jobs of run $id: unreadable JSON"
+      case "$jv" in
+        ok) chain_ok=1; break;;
+        err*) refuse "jobs of run $id: $(printf '%s\n' "$jv" | cut -f2)";;
+      esac
+      seen="$seen${seen:+; }$id: $jv"
+    done
+    [ $chain_ok -eq 1 ] || refuse "no nightly.yml run on $sha has every chain job concluded success ($seen)"
+  fi
   # b. Codex's last read is the head, or the head is only its review report on top of what Codex read.
   rv="docs/md-reports/$ms-milestone-review.md"
   gh_content "$rv" "$tmp/review"

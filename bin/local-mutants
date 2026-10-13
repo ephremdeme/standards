@@ -1,0 +1,145 @@
+#!/bin/sh
+# Usage: standards/bin/local-mutants <clone> <base> <crate> [--tests <name>[,<name>...]]     (integrator; exchange D-110)
+# The local mutation run that replaces the Actions `mutants` workflow (dormant): `cargo mutants --in-diff` over
+# `git diff <base> HEAD -- <crate>/src` with `-p <crate> --test-tool nextest --jobs 1 --timeout 60`, the replay proptest
+# excluded from every test run (`-- -E 'not test(=random_sessions_match_model)'`, as the dormant workflow does), and
+# each --tests name passed on as `--test <name>` after `--`, so a mutant runs only those test binaries (without --tests,
+# the crate's whole suite). Both cargo mutants calls, the --list and the run, carry --no-config, as the dormant
+# workflow does: a .cargo/mutants.toml in the tree never changes the selection or the test command. <base> is a full
+# 40-character lowercase hex SHA (a ref like HEAD~1 or a branch name can move), named on stderr as "base: <sha>".
+# Every cargo mutants call executes inside `systemd-run --user --scope --quiet -p MemoryMax=${MUTANTS_MEMORY_MAX:-3G}
+# -p MemorySwapMax=0 -p OOMPolicy=stop --` (--quiet: nothing but the command's output on stdout; OOMPolicy=stop: a
+# mutant that meets the cap stops the whole run, which then fails, instead of counting as caught), so a runaway mutant
+# meets the cap instead of the machine's OOM killer (8 GB shared; OOM x4 on 2026-10-03). The scope is probed first and
+# never skipped: the probe reads memory.max of its own cgroup (`sh -c 'cat /sys/fs/cgroup$(cut -d: -f3
+# /proc/self/cgroup)/memory.max'`), which must equal MUTANTS_MEMORY_MAX in bytes (K, M, G x 1024^n; a user manager
+# without the memory controller creates the scope and ignores the cap). cargo mutants runs its own baseline (no
+# --baseline=skip) in a copy of the tree (--in-place conflicts with --jobs) under the machine build lock
+# (bin/build-lock.sh), with RUSTC_WRAPPER=sccache: every run is cached unless MUTANTS_NO_SCCACHE=1 opts out. Residual: an sccache server already running outside the scope compiles outside the
+# cap; the tests, where runaways happen, always run inside it.
+# Only in a disposable clone (bin/mutants' rules: its own .git directory, no remote, clean tree, no other worktree),
+# never a lane worktree or the primary checkout. Files in scope: every <crate>/src/**/*.rs the diff adds, modifies or
+# renames (deletions excluded), with or without mutants, sorted. Outcomes are counted apart from
+# mutants.out/{caught,missed,unviable,timeout}.txt; tested is their sum and must equal `cargo mutants --list` for the
+# same selection (a listing of 0 skips the run). Exactly one line goes to stdout and to <clone>/mutants-run.txt (C4
+# format, BACKLOG 40; unviable and timeout are never caught); everything else goes to stderr:
+#   run: <sha> files: <f1> <f2> ... tested: <t> missed: <m> caught: <c> unviable: <u> timeout: <k>
+# The names are space-separated, as the exchange's mutants ledger prints them and its instrument splits them.
+# Exit 0 iff missed + timeout = 0 and cargo mutants exited 0. Exit 1 with the line: survivors (missed or timeout).
+# Exit 1 without it: an incomplete run (tested != listed), cargo mutants failing (--list, a red baseline, any exit
+# other than 0/2/3, an exit 2/3 its outcome files contradict), missing outcome files, mutants-run.txt unwritable.
+# Exit 2, "local-mutants: refused — <reason>" (nothing run): usage; <base> not 40 lowercase hex; an empty --tests list
+# or a name not [A-Za-z0-9_]+; MUTANTS_MEMORY_MAX not ^[0-9]+[KMG]$, or not 1 to 9 digits without a leading zero (the
+# byte count stays exact); MUTANTS_NO_SCCACHE neither 1 nor unset; no sccache without that opt-out; systemd-run
+# missing or unable to create the scope or read its memory.max; "memory cap not enforced" (the scope's memory.max is
+# not the cap in bytes); not a disposable clone; <base> not a commit; no file in scope; a changed file name the run:
+# line cannot carry. Exit 3: the build lock is held elsewhere after BUILD_LOCK_WAIT.
+set -u
+PATH="$HOME/.cargo/bin:$PATH"; export PATH
+LC_ALL=C; export LC_ALL
+here=$(cd "$(dirname "$0")" && pwd -P) || { echo "local-mutants: cannot locate its own directory" >&2; exit 2; }
+usage() { echo "local-mutants: usage: local-mutants <clone> <base> <crate> [--tests <name>[,<name>...]]" >&2; exit 2; }
+refuse() { echo "local-mutants: refused — $1" >&2; exit 2; }
+fail() { echo "local-mutants: $1" >&2; exit 1; }
+[ $# -eq 3 ] || { [ $# -eq 5 ] && [ "$4" = --tests ]; } || usage
+clone_arg=$1; base=$2; crate=$3
+case "$crate" in ''|-*|*[!A-Za-z0-9_-]*) usage;; esac
+case "$base" in ''|-*) usage;; esac
+case "$base" in *[!0-9a-f]*) refuse "<base> must be a full 40-character lowercase hex SHA, got '$base'";; esac
+[ ${#base} -eq 40 ] || refuse "<base> must be a full 40-character lowercase hex SHA, got '$base'"
+# The names are [A-Za-z0-9_]+ once checked, so $testargs splits into exactly its words.
+testargs=
+if [ $# -eq 5 ]; then
+  tests=$5
+  [ -n "$tests" ] || refuse "--tests needs at least one test binary name"
+  case "$tests" in ,*|*,|*,,*) refuse "--tests '$tests' has a name that is not [A-Za-z0-9_]+";; esac
+  rest=$tests
+  while [ -n "$rest" ]; do
+    name=${rest%%,*}
+    case "$name" in ''|*[!A-Za-z0-9_]*) refuse "--tests '$tests' has a name that is not [A-Za-z0-9_]+";; esac
+    testargs="$testargs --test $name"
+    case "$rest" in *,*) rest=${rest#*,};; *) rest=;; esac
+  done
+fi
+mm=${MUTANTS_MEMORY_MAX:-3G}
+mmn=${mm%[KMG]}
+case "$mmn" in ''|*[!0-9]*) mmn=;; esac
+[ -n "$mmn" ] && [ "$mmn" != "$mm" ] || refuse "MUTANTS_MEMORY_MAX must be digits followed by K, M or G (like 3G), got '$mm'"
+# The cap in bytes, for the read-back below: no leading zero (shell arithmetic reads it as octal) and at most 9 digits
+# (999999999G stays below 2^63).
+case "$mmn" in 0*|??????????*) refuse "MUTANTS_MEMORY_MAX must be 1 to 9 digits without a leading zero, then K, M or G, got '$mm'";; esac
+case "$mm" in *K) mmb=$((mmn * 1024));; *M) mmb=$((mmn * 1048576));; *) mmb=$((mmn * 1073741824));; esac
+case "${MUTANTS_NO_SCCACHE-}" in
+  '') sc=$(command -v sccache 2>/dev/null) && [ -n "$sc" ] \
+        || refuse "sccache is not in \$HOME/.cargo/bin or on PATH; every mutation run is cached (MUTANTS_NO_SCCACHE=1 opts out)"
+      RUSTC_WRAPPER=sccache; cache="sccache $sc";;
+  1) RUSTC_WRAPPER=; cache="none (MUTANTS_NO_SCCACHE=1)";;
+  *) refuse "MUTANTS_NO_SCCACHE must be 1 or unset, got '$MUTANTS_NO_SCCACHE'";;
+esac
+export RUSTC_WRAPPER
+command -v systemd-run >/dev/null 2>&1 || refuse "systemd-run is not on PATH; cargo mutants never runs without the memory cap"
+notclone() { refuse "$1 is not a disposable clone (its own .git directory, no remote, clean tree)"; }
+[ -d "$clone_arg" ] || notclone "$clone_arg"
+clone=$(cd "$clone_arg" && pwd -P) || notclone "$clone_arg"
+[ -d "$clone/.git" ] && [ ! -L "$clone/.git" ] || notclone "$clone"
+top=$(git -C "$clone" rev-parse --show-toplevel 2>/dev/null) && [ "$(cd "$top" && pwd -P)" = "$clone" ] || notclone "$clone"
+gd=$(git -C "$clone" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) && [ "$(cd "$gd" && pwd -P)" = "$clone/.git" ] || notclone "$clone"
+remotes=$(git -C "$clone" remote) || notclone "$clone"
+[ -z "$remotes" ] || notclone "$clone"
+wts=$(git -C "$clone" worktree list --porcelain) || notclone "$clone"
+[ "$(printf '%s\n' "$wts" | grep -c '^worktree ')" -eq 1 ] || notclone "$clone"
+st=$(git -C "$clone" status --porcelain --untracked-files=all --ignore-submodules=none) || notclone "$clone"
+[ -z "$st" ] || notclone "$clone"
+git -C "$clone" rev-parse -q --verify "$base^{commit}" >/dev/null 2>&1 || refuse "$base is not a commit in $clone"
+echo "base: $base" >&2
+sha=$(git -C "$clone" rev-parse HEAD) || fail "git rev-parse HEAD failed in $clone"
+out=$(mktemp -d "${TMPDIR:-/tmp}/local-mutants.XXXXXX") || fail "mktemp failed"
+git -C "$clone" diff --no-color --no-ext-diff "$base" HEAD -- "$crate/src" > "$out/changes.diff" || fail "git diff $base HEAD failed in $clone"
+names=$(git -C "$clone" diff --no-color --name-only --diff-filter=d "$base" HEAD -- "$crate/src") || fail "git diff --name-only failed in $clone"
+# git quotes an unusual name ("..."), so a quoted .rs name is caught here too, never silently dropped; with only these
+# characters a name holds no space, so the space-separated list splits back into exactly its names.
+rs=$(printf '%s\n' "$names" | grep -E '\.rs"?$')
+odd=$(printf '%s\n' "$rs" | grep -vE '^[A-Za-z0-9_./-]+$' | head -n 1)
+[ -z "$odd" ] || refuse "the changed file '$odd' has a name the run: line cannot carry (only A-Z a-z 0-9 _ . / -)"
+files=$(printf '%s\n' "$rs" | grep -E "^$crate/src/.+\.rs\$" | sort | paste -s -d ' ' -)
+[ -n "$files" ] || refuse "no $crate/src/**/*.rs file changed in $base..HEAD; nothing to mutate"
+scope() { systemd-run --user --scope --quiet -p "MemoryMax=$mm" -p MemorySwapMax=0 -p OOMPolicy=stop -- "$@"; }
+# The probe reads the cap back from the scope's own cgroup (the single quotes keep $(...) for the scope's shell).
+if ! scope sh -c 'cat /sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max' > "$out/scope-probe.out" 2> "$out/scope-probe.err"; then
+  why=$(grep . "$out/scope-probe.err" | head -n 1)
+  refuse "systemd-run could not create a scope with MemoryMax=$mm, MemorySwapMax=0 and OOMPolicy=stop or read its memory.max (${why:-no message}); cargo mutants never runs uncapped"
+fi
+got=$(cat "$out/scope-probe.out") || refuse "could not read $out/scope-probe.out"
+[ "$got" = "$mmb" ] || refuse "memory cap not enforced: the scope's memory.max reads '$got', not $mmb (MemoryMax=$mm); cargo mutants never runs uncapped"
+cd "$clone" || notclone "$clone"
+BUILD_LOCK_WHO=local-mutants; . "$here/build-lock.sh"
+build_lock_acquire; rc=$?
+if [ $rc -eq 3 ]; then build_lock_refusal; exit 3; fi
+[ $rc -eq 0 ] || exit $rc
+build_lock_env || exit 1
+echo "local-mutants: compiler cache: $cache; MemoryMax=$mm; outcomes in $out" >&2
+scope cargo mutants --list --no-config --in-diff "$out/changes.diff" -p "$crate" > "$out/list.txt" 2> "$out/list.err"; lrc=$?
+[ $lrc -eq 0 ] || fail "cargo mutants --list failed (rc=$lrc); see $out/list.err"
+n_of() { n=$(grep -c . "$1"); case "$n" in ''|*[!0-9]*) fail "could not read $1";; esac; echo "$n"; }
+listed=$(n_of "$out/list.txt") || exit 1
+c=0; m=0; u=0; k=0; mrc=0; o="$out/mutants.out"
+if [ "$listed" -gt 0 ]; then
+  scope cargo mutants --no-config --in-diff "$out/changes.diff" -p "$crate" --test-tool nextest --jobs 1 --timeout 60 -o "$out" \
+    -- -E 'not test(=random_sessions_match_model)' $testargs > "$out/mutants.log" 2>&1; mrc=$?
+  case $mrc in
+    0|2|3) ;;
+    4) fail "cargo mutants failed (rc=4: its baseline, the unmutated tree, is red); log: $out/mutants.log";;
+    *) fail "cargo mutants failed (rc=$mrc); log: $out/mutants.log";;
+  esac
+  for kind in caught missed timeout unviable; do [ -f "$o/$kind.txt" ] || fail "no outcome files in $o (cargo mutants did not finish)"; done
+  c=$(n_of "$o/caught.txt") || exit 1; m=$(n_of "$o/missed.txt") || exit 1
+  u=$(n_of "$o/unviable.txt") || exit 1; k=$(n_of "$o/timeout.txt") || exit 1
+fi
+t=$((c + m + u + k))
+[ "$t" -eq "$listed" ] || fail "incomplete run — tested $t (missed $m, caught $c, unviable $u, timeout $k) of $listed listed mutants"
+if [ $mrc -ne 0 ] && [ $((m + k)) -eq 0 ]; then fail "cargo mutants exited $mrc but its outcome files list no missed or timed-out mutant"; fi
+line="run: $sha files: $files tested: $t missed: $m caught: $c unviable: $u timeout: $k"
+( printf '%s\n' "$line" > "$clone/mutants-run.txt" ) 2>/dev/null || fail "could not write $clone/mutants-run.txt"
+printf '%s\n' "$line"
+if [ $((m + k)) -ne 0 ]; then echo "local-mutants: survivors — see $o/missed.txt and $o/timeout.txt" >&2; exit 1; fi
+exit 0

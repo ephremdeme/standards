@@ -85,8 +85,14 @@ _bl_cleanfail() { echo "build-lock: could not clean the previous worktree's work
 
 # Shared target dir, switch clean and sccache for the cargo commands the caller runs next (call after acquiring).
 build_lock_env() {
+  # sccache is looked for the way cargo is below: on PATH, then in $HOME/.cargo/bin (appended, so the caller's own tools
+  # keep precedence). Installed there but missing from PATH, the cache was silently off (2026-10-13: 412 requests, 2
+  # hits). The line naming it puts "the cache is on" into every log that builds.
   if [ -z "${RUSTC_WRAPPER+x}" ]; then
-    if command -v sccache >/dev/null 2>&1; then RUSTC_WRAPPER=sccache; export RUSTC_WRAPPER
+    if ! command -v sccache >/dev/null 2>&1 && [ -x "${HOME:-/nonexistent}/.cargo/bin/sccache" ]; then
+      PATH="$PATH:$HOME/.cargo/bin"; export PATH; fi
+    if _bl_sc=$(command -v sccache 2>/dev/null) && [ -n "$_bl_sc" ]; then
+      RUSTC_WRAPPER=sccache; export RUSTC_WRAPPER; echo "build-lock: sccache $_bl_sc" >&2
     else echo "build-lock: sccache not installed — no compiler cache" >&2; fi
   fi
   if ! _bl_top=$(git rev-parse --show-toplevel 2>/dev/null) || [ -z "$_bl_top" ]; then

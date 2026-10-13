@@ -81,7 +81,15 @@ check_ "control: ... the absolute-path cargo did not run" '! grep -q "^cargo bui
 want "cargo only in \$HOME/.cargo/bin -> found, the switch clean runs" 0 '' env HOME="$T/h2" PATH=/usr/bin:/bin sh -c 'cd "$1" && sh "$2" "$3/h2/.cargo/bin/cargo" build' _ "$B" "$WBL" "$T"
 check_ "... clean recorded before the command (every profile, then the build)" '[ "$(grep -c "^cargo clean -p m1 -p m2" "$T/cargo.log")" -eq 3 ] && grep -qx "cargo clean -p m1 -p m2 --release" "$T/cargo.log" && [ "$(tail -n 1 "$T/cargo.log")" = "cargo build" ]'
 want "sccache installed -> RUSTC_WRAPPER=sccache" 0 '^W=sccache$' env PATH="$T/sc:$PATH" sh -c 'cd "$1" && sh "$2" sh -c "echo W=\$RUSTC_WRAPPER"' _ "$B" "$WBL"
-want "sccache absent -> one note, no failure" 0 '^build-lock: sccache not installed — no compiler cache$' in_dir "$B" sh "$WBL" true
+want "... and one line names the sccache in use" 0 "^build-lock: sccache $T/sc/sccache\$" env PATH="$T/sc:$PATH" sh -c 'cd "$1" && sh "$2" true' _ "$B" "$WBL"
+# A HOME without sccache: the machine's own ~/.cargo/bin/sccache must not decide this case.
+want "sccache absent -> one note, no failure" 0 '^build-lock: sccache not installed — no compiler cache$' env HOME="$T/nohome" sh -c 'cd "$1" && sh "$2" true' _ "$B" "$WBL"
+# sccache installed in $HOME/.cargo/bin but that directory not on PATH (the 2026-10-13 measurement: 412 requests, 2 hits):
+# found the way cargo is, RUSTC_WRAPPER set and the directory appended to the PATH the command sees.
+mkdir -p "$T/hs/.cargo/bin"; cp "$T/sc/sccache" "$T/hs/.cargo/bin/sccache"
+want "control: sccache only in \$HOME/.cargo/bin, not on PATH -> found and named" 0 "^build-lock: sccache $T/hs/\.cargo/bin/sccache\$" env HOME="$T/hs" sh -c 'cd "$1" && sh "$2" true' _ "$B" "$WBL"
+want "control: ... RUSTC_WRAPPER=sccache reaches the command, with \$HOME/.cargo/bin last on its PATH" 0 "^W=sccache P=$T/bin:/usr/bin:/bin:$T/hs/\.cargo/bin\$" \
+  env HOME="$T/hs" sh -c 'cd "$1" && sh "$2" sh -c "echo W=\$RUSTC_WRAPPER P=\$PATH"' _ "$B" "$WBL"
 want "a caller's RUSTC_WRAPPER and CARGO_TARGET_DIR are kept" 0 "^W=mine T=$T/mytarget\$" env RUSTC_WRAPPER=mine CARGO_TARGET_DIR="$T/mytarget" sh -c 'cd "$1" && sh "$2" sh -c "echo W=\$RUSTC_WRAPPER T=\$CARGO_TARGET_DIR"' _ "$B" "$WBL"
 want "control: no command -> usage, exit 2" 2 '^with-build-lock: usage: with-build-lock <command> \[args…\]$' sh "$WBL"
 # check takes the lock around its Rust steps: a foreign lock is a BLOCKED rust line and exit 1, never a skipped pass.
