@@ -18,15 +18,24 @@ if [ "$_vl_rc" -eq 3 ]; then build_lock_refusal; exit 3; fi
 trap 'build_lock_release; rmdir "$VERIFY_LOCK" 2>/dev/null' EXIT
 build_lock_env || exit 1
 
+# VERIFY_FAIL_TAIL: how many lines of a failing command's output the helpers print (default 8; the exchange nightlies of
+# 10-10 and 10-11 lost their cause and replay seed to 8). Read per call and checked before the command runs, so a bad
+# value stops the instrument (exit 2) instead of silently printing another length; tail itself must accept the value.
+_vl_fail_tail_valid() {
+  case "${VERIFY_FAIL_TAIL:-8}" in ''|0*|*[!0-9]*) ;; *) tail -n "${VERIFY_FAIL_TAIL:-8}" </dev/null >/dev/null 2>&1 && return 0;; esac
+  echo "verify-lib: VERIFY_FAIL_TAIL must be a positive integer, got '${VERIFY_FAIL_TAIL-}'" >&2; exit 2
+}
+
 # expect_out "<label>" <wanted_rc> '<regex>' -- cmd args...
 # Passes only if the real exit code == wanted AND combined output matches regex (the check's OWN diagnostic).
 expect_out() {
+  _vl_fail_tail_valid
   local label=$1 want=$2 re=$3; shift 3; [ "$1" = "--" ] && shift
   local out rc; out=$("$@" 2>&1); rc=$?
   if [ "$rc" -eq "$want" ] && printf '%s' "$out" | grep -Eq -- "$re"; then
     echo "[ok]   $label"; VERIFY_OK=$((VERIFY_OK+1))
   else
-    echo "[FAIL] $label (rc=$rc, wanted $want, /$re/)"; printf '%s\n' "$out" | tail -n 8 | sed 's/^/       /'
+    echo "[FAIL] $label (rc=$rc, wanted $want, /$re/)"; printf '%s\n' "$out" | tail -n "${VERIFY_FAIL_TAIL:-8}" | sed 's/^/       /'
     VERIFY_FAIL=$((VERIFY_FAIL+1))
   fi
 }
@@ -37,6 +46,7 @@ expect_out() {
 # when the command carries no -E/--filterset/--filter-expr — `0 skipped`. A filtered run reports every other test as
 # skipped, so it needs an exact passed count instead.
 expect_nextest() {
+  _vl_fail_tail_valid
   local label=$1 want=$2; shift 2; [ "${1:-}" = "--" ] && shift
   local filtered=0 a out rc sum run passed why=""
   for a in "$@"; do case "$a" in -E|-E?*|--filterset|--filterset=*|--filter-expr|--filter-expr=*) filtered=1;; esac; done
@@ -56,7 +66,7 @@ expect_nextest() {
   fi
   if [ -z "$why" ]; then echo "[ok]   $label"; VERIFY_OK=$((VERIFY_OK+1))
   else
-    echo "[FAIL] $label ($why; summary: ${sum:-none})"; printf '%s\n' "$out" | tail -n 8 | sed 's/^/       /'
+    echo "[FAIL] $label ($why; summary: ${sum:-none})"; printf '%s\n' "$out" | tail -n "${VERIFY_FAIL_TAIL:-8}" | sed 's/^/       /'
     VERIFY_FAIL=$((VERIFY_FAIL+1))
   fi
 }
