@@ -4,6 +4,8 @@
 # decisions, compare .json; <key>.err makes that call fail) and records every call in $G/calls and the merge call in
 # $G/merge. Every control is refused for its own message AND the stub saw no merge call; every positive case asserts the
 # exact merge call. No network: a bogus GH_TOKEN and an empty GH_CONFIG_DIR, and the run aborts unless gh is the stub.
+# The --local-log cases (D-109) write the gate log line by line (glog) and make every check-runs, status and nightly
+# read fail (nochecks), so a merge proves those endpoints were not needed and the calls log proves they were not read.
 # Run: sh standards/tests/merge-pr.t.sh   -> exit 0 when all cases behave.
 set -u
 S=$(cd "$(dirname "$0")/.." && pwd); MP="$S/bin/merge-pr"; T=$(mktemp -d); R=0
@@ -157,6 +159,39 @@ mk $LB; printf 'PASS    a\nsmoke-head: %s\n' "$X" > "$SL"; refused "a smoke log 
 mk $LB; printf 'PASS    a\nsmoke-head: %s\nsmoke-head: %s\n' "$H" "$X" > "$SL"; refused "a smoke log naming two heads" "smoke log $SL is for $X, not $H\$" $ST 9 "$H" --smoke-log "$SL"
 mk $LB; printf 'PASS    a\n' > "$SL"; refused "a smoke log without a smoke-head line" "smoke log $SL has no smoke-head line\$" $ST 9 "$H" --smoke-log "$SL"
 mk $LB; refused "a smoke log that does not exist" "smoke log $T/none is not a readable file\$" $ST 9 "$H" --smoke-log "$T/none"
+# Rule 3, exchange and game: the local gate log (bin/local-gate) instead of the check runs and the status (D-109).
+LL="$T/local.log"; GHL="gate-head: $H"; V8='verify:e8 — 4 ok, 0 failed'; V9='verify:e9 — 5 ok, 0 failed'
+glog(){ printf '%s\n' "$@" > "$LL"; }   # glog <line>...: the local gate log, exactly these lines
+nochecks(){ # a read of the check runs, the commit status or the nightly runs fails loudly
+  echo 'HTTP 599: check runs must not be read' > "$G/checks.err"; echo 'HTTP 599: the status must not be read' > "$G/status.err"
+  echo 'HTTP 599: nightly runs must not be read' > "$G/nightly.err"; }
+mk $LB; glog 'check: OK' "$V9" "$GHL"; refused "--local-log on standards" '--local-log applies to ephremdeme/exchange and ephremdeme/game only \(ephremdeme/standards uses --smoke-log\)$' $ST 9 "$H" --local-log "$LL"
+mk $LB; printf 'PASS    a\nsmoke-head: %s\n' "$H" > "$SL"
+refused "--local-log together with --smoke-log (exchange)" '--local-log and --smoke-log cannot be given together$' $EX 12 "$H" --local-log "$LL" --smoke-log "$SL"
+refused "--smoke-log together with --local-log (standards)" '--local-log and --smoke-log cannot be given together$' $ST 9 "$H" --smoke-log "$SL" --local-log "$LL"
+mk $LB; nochecks; refused "a local log that does not exist" "local log $T/none is not a readable file\$" $EX 12 "$H" --local-log "$T/none"
+mk $LB; nochecks; : > "$LL"; refused "an empty local log" "local log $LL is empty\$" $EX 12 "$H" --local-log "$LL"
+mk $LB; nochecks; glog 'PASS  rust fmt' 'check: OK' 'FAIL  rust tests' 'check: FAILED' "$V9" "$GHL"
+refused "a local log with check: FAILED" "local log $LL has 1 check: FAILED line\(s\)\$" $EX 12 "$H" --local-log "$LL"
+mk $LB; nochecks; glog 'check: OK' '[ok]   a' '[FAIL] b (rc=1, wanted 0, /x/)' "$V9" "$GHL"
+refused "a local log with a [FAIL] line" "local log $LL has 1 \[FAIL\] line\(s\)\$" $EX 12 "$H" --local-log "$LL"
+mk $LB; nochecks; glog 'check: OK' "$V8" 'verify:e9 — 4 ok, 1 failed' "$GHL"
+refused "a local log with a verify line of 1 failed" "local log $LL has 1 verify line\(s\) with failures \(first: verify:e9 — 4 ok, 1 failed\)\$" $EX 12 "$H" --local-log "$LL"
+mk $LB; nochecks; glog "$V9" "$GHL"; refused "a local log without check: OK" "local log $LL has no check: OK line\$" $EX 12 "$H" --local-log "$LL"
+mk $LB; nochecks; glog 'check: OK' "$GHL"
+refused "a local log without a verify line" "local log $LL has no passing verify line \(verify:<id> — N ok, 0 failed with N >= 1\)\$" $EX 12 "$H" --local-log "$LL"
+mk $LB; nochecks; glog 'check: OK' 'verify:e9 — 0 ok, 0 failed' "$GHL"
+refused "a local log whose only verify line has 0 ok" "local log $LL has no passing verify line \(verify:<id> — N ok, 0 failed with N >= 1\)\$" $EX 12 "$H" --local-log "$LL"
+mk $LB; nochecks; glog 'check: OK' 'verify:e9 - 5 ok, 0 failed' "$GHL"
+refused "a local log whose verify line has a hyphen, not the em dash" "local log $LL has no passing verify line \(verify:<id> — N ok, 0 failed with N >= 1\)\$" $EX 12 "$H" --local-log "$LL"
+mk $LB; nochecks; glog 'check: OK' "$V9" 'gate-tree: clean'; refused "a local log without gate-head" "local log $LL has no gate-head line\$" $EX 12 "$H" --local-log "$LL"
+mk $LB; nochecks; glog 'check: OK' "$V9" "gate-head: $X"; refused "a local log for another SHA" "local log $LL is for $X, not $H\$" $EX 12 "$H" --local-log "$LL"
+mk $LB; nochecks; glog 'check: OK' "$V9" "$GHL" "gate-head: $X"; refused "a local log naming two heads" "local log $LL is for $X, not $H\$" $EX 12 "$H" --local-log "$LL"
+mk $LB; nochecks; glog 'check: OK' "$V9" "gate-head: $H8"
+refused "a local log whose gate-head is not 40 lowercase hex" "local log $LL has a gate-head line that is not 'gate-head: <40 lowercase hex>': gate-head: $H8\$" $GA 12 "$H" --local-log "$LL"
+mk; nochecks; glog 'check: OK' "$V8" "$GHL"
+refused "a milestone local log whose verify line names another milestone" "local log $LL has no verify:e9 — N ok, 0 failed line \(the full chain of e9\)\$" $EX 12 "$H" $MS --local-log "$LL"
+check_ "control: ... the nightly runs were not read" '[ -s "$G/calls" ] && ! grep -q nightly "$G/calls"'
 # Founder approval forced by the paths a PR changes (.github/**, .claude/**, CODEOWNERS).
 mk $LB; pr OPEN false "$H" main $LB false 2; files code.rs .github/workflows/ci.yml
 refused "a .github change without founder-approved" 'label founder-approved is not on PR #12 \(required: changes \.github/workflows/ci\.yml\)$' $EX 12 "$H"
@@ -228,5 +263,14 @@ check_ "... the push time was read from the activity of its branch" 'grep -Fqx "
 mk; merged "a milestone merge with both labels" "merge-pr: OK $EX#12 $H merged milestone e9" $EX 12 "$H" $MS
 check_ "... the nightly runs, the review file and the compare were read for the exact SHA" 'grep -Fqx "api --paginate repos/$EX/actions/workflows/nightly.yml/runs?head_sha=$H&per_page=100" "$G/calls" && grep -Fqx "api repos/$EX/contents/$RV?ref=$H" "$G/calls" && grep -Fqx "api repos/$EX/compare/$X...$H" "$G/calls"'
 mk; pr OPEN false "$H" main $IB false 1 founder-approved; merged "a milestone merge with a recorded residual" "merge-pr: OK $EX#12 $H merged milestone e9" $EX 12 "$H" $MS --residual D-090
+greenlog(){ glog 'Mem: 7900 total' 'PASS  rust fmt' 'check: OK' '[ok]   a' "$V8" "$V9" "$GHL" 'gate-tree: clean'; }
+mk $LB; pr OPEN false "$H" main $LB false 1; nochecks; greenlog
+merged "a lane PR on exchange with a green local gate log" "merge-pr: OK $EX#12 $H merged" $EX 12 "$H" --local-log "$LL"
+check_ "... merged without reading the check runs or the commit status" '[ -e "$G/merge" ] && ! grep -q -e check-runs -e /status "$G/calls"'
+mk $LB; pr OPEN false "$H" main $LB false 1; nochecks; greenlog
+merged "a lane PR on game with a green local gate log" "merge-pr: OK $GA#12 $H merged" $GA 12 "$H" --local-log "$LL"
+check_ "... merged without reading the check runs or the commit status" '[ -e "$G/merge" ] && ! grep -q -e check-runs -e /status "$G/calls"'
+mk; nochecks; greenlog; merged "a milestone merge with a local gate log" "merge-pr: OK $EX#12 $H merged milestone e9" $EX 12 "$H" $MS --local-log "$LL"
+check_ "... no nightly run, check run or status read; the review file and both labels' timing were" '[ -e "$G/merge" ] && ! grep -q -e nightly -e check-runs -e /status "$G/calls" && grep -Fqx "api repos/$EX/contents/$RV?ref=$H" "$G/calls" && grep -q timeline "$G/calls"'
 want "two arguments -> usage, exit 2" 2 '^merge-pr: usage: merge-pr ' sh "$MP" $EX 12
 rm -rf "$T"; [ $R -eq 0 ] && echo "merge-pr.t: all cases behave" || echo "merge-pr.t: FAILURES"; exit $R
