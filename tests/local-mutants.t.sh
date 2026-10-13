@@ -1,12 +1,15 @@
 #!/bin/sh
 # Cases for bin/local-mutants (exchange D-110, BACKLOG 40): disposable clones only; every cargo mutants call inside a
-# `systemd-run --user --scope` with MemoryMax and MemorySwapMax=0 (never uncapped); --in-diff over <base>..HEAD limited
-# to <crate>/src, --jobs 1 --timeout 60, nextest, the replay proptest excluded, optional --tests; cargo mutants' own
-# baseline; sccache required unless MUTANTS_NO_SCCACHE=1; Σ tested equal to --list; one run: line. PATH is only the
-# stub systemd-run and links to system tools: cargo and sccache exist only in the fake HOME's .cargo/bin, so a run
-# proves the script put $HOME/.cargo/bin first and no real cargo can be reached. The stub cargo logs its arguments and
-# environment, answers --list and writes outcome files; the stub systemd-run logs its arguments and runs the command
-# after `--`, or fails to create the scope. Run: sh standards/tests/local-mutants.t.sh -> exit 0 when all cases behave.
+# `systemd-run --user --scope --quiet` with MemoryMax, MemorySwapMax=0 and OOMPolicy=stop (never uncapped), the cap
+# read back from the scope's memory.max first; --no-config on both calls (the clone carries a .cargo/mutants.toml);
+# a 40-hex <base>; --in-diff over <base>..HEAD limited to <crate>/src, --jobs 1 --timeout 60, nextest, the replay
+# proptest excluded, optional --tests; cargo mutants' own baseline; sccache required unless MUTANTS_NO_SCCACHE=1;
+# Σ tested equal to --list; one run: line. PATH is only the stub systemd-run and links to system tools: cargo and
+# sccache exist only in the fake HOME's .cargo/bin, so a run proves the script put $HOME/.cargo/bin first and no real
+# cargo can be reached. The stub cargo logs its arguments and environment, answers --list and writes outcome files;
+# the stub systemd-run logs its arguments and runs the command
+# after `--` (the cap probe, which reads memory.max of its cgroup, gets $STUB/memory.max, by default 3G in bytes), or
+# fails to create the scope. Run: sh standards/tests/local-mutants.t.sh -> exit 0 when all cases behave.
 set -u
 S=$(cd "$(dirname "$0")/.." && pwd); LM="$S/bin/local-mutants"; T=$(mktemp -d); R=0
 TMPDIR=$T; export TMPDIR
@@ -51,14 +54,18 @@ echo "systemd-run $*" >> "$STUB/systemd-run.log"
 if [ -e "$STUB/scope-fail" ]; then echo "Failed to start transient scope unit: Process org.freedesktop.systemd1 exited with status 1" >&2; exit 1; fi
 while [ $# -gt 0 ] && [ "$1" != -- ]; do shift; done
 [ $# -ge 2 ] || { echo "systemd-run stub: no command after --" >&2; exit 64; }
-shift; STUB_SCOPE=capped; export STUB_SCOPE; exec "$@"
+shift
+case "$*" in *memory.max*) if [ -e "$STUB/memory.max" ]; then cat "$STUB/memory.max"; else echo 3221225472; fi; exit 0;; esac
+STUB_SCOPE=capped; export STUB_SCOPE; exec "$@"
 SD
 printf '#!/bin/sh\necho "sccache stub must not be called" >&2; exit 99\n' > "$H/.cargo/bin/sccache"
 chmod +x "$H/.cargo/bin/cargo" "$H/.cargo/bin/sccache" "$T/bin/systemd-run"; cp "$H/.cargo/bin/cargo" "$H2/.cargo/bin/cargo"
-# The fixture: a workspace (ledger, other); the change edits ledger/src/lib.rs, a comment in model.rs, adds new.rs and
-# notes.md, deletes gone.rs, and edits other/src/x.rs and ledger/Cargo.toml.
+# The fixture: a workspace (ledger, other) with a .cargo/mutants.toml that --no-config must keep out; the change edits
+# ledger/src/lib.rs, a comment in model.rs, adds new.rs and notes.md, deletes gone.rs, and edits other/src/x.rs and
+# ledger/Cargo.toml.
 P="$T/p"; git init -q -b main "$P"; printf '/target/\n.worktrees/\n' > "$P/.gitignore"
 printf '[workspace]\nmembers = ["ledger", "other"]\n' > "$P/Cargo.toml"
+mkdir -p "$P/.cargo"; printf 'additional_cargo_args = ["--all-features"]\nexclude_re = ["model"]\n' > "$P/.cargo/mutants.toml"
 mkdir -p "$P/ledger/src" "$P/other/src"; printf '[package]\nname = "ledger"\n' > "$P/ledger/Cargo.toml"
 echo 'pub fn a() {}' > "$P/ledger/src/lib.rs"; echo 'pub fn m() {}' > "$P/ledger/src/model.rs"
 echo 'pub fn g() {}' > "$P/ledger/src/gone.rs"; echo 'pub fn x() {}' > "$P/other/src/x.rs"
@@ -81,6 +88,7 @@ PATH="$T/bin:$T/sys"; export PATH
 [ "$(command -v systemd-run)" = "$T/bin/systemd-run" ] && ! command -v cargo >/dev/null && ! command -v sccache >/dev/null \
   || { echo "FAIL    PATH reaches a cargo or sccache, or not the stub systemd-run; aborting"; rm -rf "$T"; exit 1; }
 FILES='ledger/src/lib.rs ledger/src/model.rs ledger/src/new.rs'   # space-separated, as the C4 ledger prints and e3.sh parses it
+PROBE3='systemd-run --user --scope --quiet -p MemoryMax=3G -p MemorySwapMax=0 -p OOMPolicy=stop -- sh -c cat /sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max'
 reset_stub(){ rm -rf "$STUB"/* "$C/mutants-run.txt"; }
 lm(){ "$@" > "$T/out" 2> "$T/err"; lrc=$?; }   # lm <cmd...>: stdout and stderr apart, the exit code in $lrc
 runline(){ # runline <tested> <missed> <caught> <unviable> <timeout>: the exact run: line for the clone's head
@@ -103,13 +111,20 @@ want "control: --tests without a list -> usage, exit 2" 2 '^local-mutants: usage
 want "control: a fourth argument other than --tests -> usage, exit 2" 2 '^local-mutants: usage: ' sh "$LM" "$C" "$BASE" ledger --test e3_model
 want "control: a crate with a path in it -> usage, exit 2" 2 '^local-mutants: usage: ' sh "$LM" "$C" "$BASE" ../ledger
 want "control: a base that looks like an option -> usage, exit 2" 2 '^local-mutants: usage: ' sh "$LM" "$C" --output=x ledger
-want "control: a base that is not a commit -> exit 2" 2 "^local-mutants: refused — nosuchbase is not a commit in $C\$" sh "$LM" "$C" nosuchbase ledger
+NOSUCH=$(printf '%040x' 48879)
+want "control: a 40-hex base that is not a commit -> exit 2" 2 "^local-mutants: refused — $NOSUCH is not a commit in $C\$" sh "$LM" "$C" "$NOSUCH" ledger
+for b in 'HEAD~1' main nosuchbase "$(printf '%s' "$BASE" | cut -c1-12)" "${BASE}0"; do
+  want "control: base '$b' (not 40 lowercase hex) -> exit 2" 2 "^local-mutants: refused — <base> must be a full 40-character lowercase hex SHA, got '$b'\$" sh "$LM" "$C" "$b" ledger
+done
 want "control: --tests with an empty list -> exit 2" 2 "^local-mutants: refused — --tests needs at least one test binary name\$" sh "$LM" "$C" "$BASE" ledger --tests ''
 for tn in e3-model 'e3_model,,e3_fees' 'a b' '../x'; do
   want "control: --tests '$tn' -> exit 2" 2 "^local-mutants: refused — --tests '$tn' has a name that is not \[A-Za-z0-9_\]\+\$" sh "$LM" "$C" "$BASE" ledger --tests "$tn"
 done
 for mm in 3GB 512 G 1.5G -1G; do
   want "control: MUTANTS_MEMORY_MAX=$mm -> exit 2" 2 "^local-mutants: refused — MUTANTS_MEMORY_MAX must be digits followed by K, M or G \(like 3G\), got '$mm'\$" env MUTANTS_MEMORY_MAX="$mm" sh "$LM" "$C" "$BASE" ledger
+done
+for mm in 03G 0G 1234567890G; do   # the cap is compared in bytes: a leading zero (octal) or ten digits would not be exact
+  want "control: MUTANTS_MEMORY_MAX=$mm -> exit 2" 2 "^local-mutants: refused — MUTANTS_MEMORY_MAX must be 1 to 9 digits without a leading zero, then K, M or G, got '$mm'\$" env MUTANTS_MEMORY_MAX="$mm" sh "$LM" "$C" "$BASE" ledger
 done
 check_ "control: ... no systemd-run and no cargo call for any of them" '[ ! -e "$STUB/systemd-run.log" ] && [ ! -e "$STUB/cargo.log" ]'
 reset_stub
@@ -120,8 +135,14 @@ reset_stub
 want "control: no systemd-run on PATH -> exit 2, never uncapped" 2 "^local-mutants: refused — systemd-run is not on PATH; cargo mutants never runs without the memory cap\$" env PATH="$T/sys" sh "$LM" "$C" "$BASE" ledger
 check_ "control: ... no cargo call at all" '[ ! -e "$STUB/cargo.log" ]'
 reset_stub; touch "$STUB/scope-fail"
-want "control: systemd-run cannot create the scope -> exit 2" 2 "^local-mutants: refused — systemd-run could not create a scope with MemoryMax=3G and MemorySwapMax=0 \(Failed to start transient scope unit: .*\); cargo mutants never runs uncapped\$" sh "$LM" "$C" "$BASE" ledger
+want "control: systemd-run cannot create the scope -> exit 2" 2 "^local-mutants: refused — systemd-run could not create a scope with MemoryMax=3G, MemorySwapMax=0 and OOMPolicy=stop or read its memory\.max \(Failed to start transient scope unit: .*\); cargo mutants never runs uncapped\$" sh "$LM" "$C" "$BASE" ledger
 check_ "control: ... no cargo mutants call" 'nocall'
+# The cap read back (review minor): a user manager without the memory controller creates the scope but ignores MemoryMax.
+for v in max 3000000000 ''; do
+  reset_stub; printf '%s' "$v" > "$STUB/memory.max"
+  want "control: the scope's memory.max reads '$v' for MemoryMax=3G -> exit 2" 2 "^local-mutants: refused — memory cap not enforced: the scope's memory\.max reads '$v', not 3221225472 \(MemoryMax=3G\); cargo mutants never runs uncapped\$" sh "$LM" "$C" "$BASE" ledger
+  check_ "control: ... no cargo mutants call" 'nocall'
+done
 reset_stub
 want "control: no <crate>/src .rs file changed in the diff -> exit 2" 2 "^local-mutants: refused — no api/src/\*\*/\*\.rs file changed in $BASE\.\.HEAD; nothing to mutate\$" sh "$LM" "$C" "$BASE" api
 reset_stub
@@ -154,20 +175,24 @@ reset_stub; echo 6 > "$STUB/list"; echo 4 > "$STUB/caught"; echo 2 > "$STUB/unvi
 printed "green: 6 listed = 4 caught + 2 unviable -> exit 0, one run: line (unviable not caught)" 0 "$(runline 6 0 4 2 0)"
 check_ "... files: holds new.rs, changed with zero mutants (not gone.rs, notes.md, other/ or Cargo.toml)" 'grep -q " files: $FILES tested: " "$T/out" && ! grep -q "new\.rs" "$STUB/cargo.log"'
 check_ "... cargo and sccache were found in \$HOME/.cargo/bin; every cargo mutants call ran inside the scope with RUSTC_WRAPPER=sccache" '[ "$(grep -c "cargo mutants " "$STUB/cargo.log")" -eq 2 ] && ! grep "cargo mutants " "$STUB/cargo.log" | grep -qv "^scope=capped wrapper=\[sccache\] "'
-check_ "... every systemd-run call is --user --scope -p MemoryMax=3G -p MemorySwapMax=0 --" '[ "$(grep -c "" "$STUB/systemd-run.log")" -eq 3 ] && ! grep -qv "^systemd-run --user --scope -p MemoryMax=3G -p MemorySwapMax=0 -- " "$STUB/systemd-run.log"'
-check_ "... the run: --in-diff, -p ledger, nextest, --jobs 1 --timeout 60, -o, the replay proptest excluded, no --test" 'grep -Eq "^scope=capped wrapper=\[sccache\] cargo mutants --in-diff [^ ]+/changes\.diff -p ledger --test-tool nextest --jobs 1 --timeout 60 -o [^ ]+ -- -E not test\(=random_sessions_match_model\)\$" "$STUB/cargo.log"'
+check_ "... every systemd-run call is --user --scope --quiet -p MemoryMax=3G -p MemorySwapMax=0 -p OOMPolicy=stop --, the first the cap probe" '[ "$(grep -c "" "$STUB/systemd-run.log")" -eq 3 ] && ! grep -qv "^systemd-run --user --scope --quiet -p MemoryMax=3G -p MemorySwapMax=0 -p OOMPolicy=stop -- " "$STUB/systemd-run.log" && [ "$(head -n 1 "$STUB/systemd-run.log")" = "$PROBE3" ]'
+check_ "... the run: --no-config, --in-diff, -p ledger, nextest, --jobs 1 --timeout 60, -o, the replay proptest excluded, no --test" 'grep -Eq "^scope=capped wrapper=\[sccache\] cargo mutants --no-config --in-diff [^ ]+/changes\.diff -p ledger --test-tool nextest --jobs 1 --timeout 60 -o [^ ]+ -- -E not test\(=random_sessions_match_model\)\$" "$STUB/cargo.log"'
 check_ "... cargo mutants runs its own baseline (no --baseline) and copies the tree (no --in-place)" '! grep -q -e --baseline -e --in-place "$STUB/cargo.log"'
-check_ "... --list ran first, with the same selection" 'grep "cargo mutants " "$STUB/cargo.log" | head -n 1 | grep -Eq "^scope=capped wrapper=\[sccache\] cargo mutants --list --in-diff [^ ]+/changes\.diff -p ledger\$"'
+check_ "... --list ran first, with the same selection and --no-config" 'grep "cargo mutants " "$STUB/cargo.log" | head -n 1 | grep -Eq "^scope=capped wrapper=\[sccache\] cargo mutants --list --no-config --in-diff [^ ]+/changes\.diff -p ledger\$"'
+check_ "... the clone carries .cargo/mutants.toml and both cargo mutants calls carry --no-config" '[ -f "$C/.cargo/mutants.toml" ] && [ "$(grep -c "cargo mutants " "$STUB/cargo.log")" -eq 2 ] && [ "$(grep "cargo mutants " "$STUB/cargo.log" | grep -c -- " --no-config ")" -eq 2 ]'
+check_ "... stderr names the base (base: <sha>); stdout is the run: line alone" 'grep -qx "base: $BASE" "$T/err" && [ "$(grep -c "" "$T/out")" -eq 1 ]'
 check_ "... the diff holds only ledger/src paths" 'grep -q "^diff --git a/ledger/src/lib.rs " "$STUB/diff.seen" && ! grep "^diff --git " "$STUB/diff.seen" | grep -qv "^diff --git a/ledger/src/"'
 reset_stub; echo 2 > "$STUB/list"; echo 2 > "$STUB/caught"; lm sh "$LM" "$C" "$BASE" ledger --tests e3_model,e3_fees
 printed "--tests e3_model,e3_fees -> exit 0, the run: line unchanged" 0 "$(runline 2 0 2 0 0)"
-check_ "... --test e3_model --test e3_fees follow -- in the run, not in --list" 'grep -Eq "^scope=capped wrapper=\[sccache\] cargo mutants --in-diff .* -- -E not test\(=random_sessions_match_model\) --test e3_model --test e3_fees\$" "$STUB/cargo.log" && ! grep "cargo mutants --list" "$STUB/cargo.log" | grep -q -- "--test "'
+check_ "... --test e3_model --test e3_fees follow -- in the run, not in --list" 'grep -Eq "^scope=capped wrapper=\[sccache\] cargo mutants --no-config --in-diff .* -- -E not test\(=random_sessions_match_model\) --test e3_model --test e3_fees\$" "$STUB/cargo.log" && ! grep "cargo mutants --list" "$STUB/cargo.log" | grep -q -- "--test "'
 reset_stub; echo 1 > "$STUB/list"; echo 1 > "$STUB/caught"; lm env HOME="$H2" MUTANTS_NO_SCCACHE=1 sh "$LM" "$C" "$BASE" ledger
 printed "MUTANTS_NO_SCCACHE=1 without sccache -> exit 0" 0 "$(runline 1 0 1 0 0)"
 check_ "... the opt-out ran cargo mutants with no rustc wrapper" '[ "$(grep -c "cargo mutants " "$STUB/cargo.log")" -eq 2 ] && ! grep "cargo mutants " "$STUB/cargo.log" | grep -qv "^scope=capped wrapper=\[\] "'
-reset_stub; echo 1 > "$STUB/list"; echo 1 > "$STUB/caught"; lm env MUTANTS_MEMORY_MAX=512M sh "$LM" "$C" "$BASE" ledger
-printed "MUTANTS_MEMORY_MAX=512M -> exit 0" 0 "$(runline 1 0 1 0 0)"
-check_ "... every scope had MemoryMax=512M" '[ -s "$STUB/systemd-run.log" ] && ! grep -qv "^systemd-run --user --scope -p MemoryMax=512M -p MemorySwapMax=0 -- " "$STUB/systemd-run.log"'
+reset_stub; echo 1 > "$STUB/list"; echo 1 > "$STUB/caught"; echo 536870912 > "$STUB/memory.max"; lm env MUTANTS_MEMORY_MAX=512M sh "$LM" "$C" "$BASE" ledger
+printed "MUTANTS_MEMORY_MAX=512M, memory.max 536870912 -> exit 0" 0 "$(runline 1 0 1 0 0)"
+check_ "... every scope had MemoryMax=512M" '[ -s "$STUB/systemd-run.log" ] && ! grep -qv "^systemd-run --user --scope --quiet -p MemoryMax=512M -p MemorySwapMax=0 -p OOMPolicy=stop -- " "$STUB/systemd-run.log"'
+reset_stub; echo 1 > "$STUB/list"; echo 1 > "$STUB/caught"; lm env MUTANTS_MEMORY_MAX=3145728K sh "$LM" "$C" "$BASE" ledger
+printed "MUTANTS_MEMORY_MAX=3145728K, memory.max 3221225472 (K x 1024) -> exit 0" 0 "$(runline 1 0 1 0 0)"
 reset_stub; echo 0 > "$STUB/list"; lm sh "$LM" "$C" "$BASE" ledger
 printed "no mutant on the changed lines -> exit 0, tested 0, no mutation run" 0 "$(runline 0 0 0 0 0)"
 check_ "... only the --list call ran" '[ "$(grep -c "cargo mutants " "$STUB/cargo.log")" -eq 1 ] && grep -q "cargo mutants --list " "$STUB/cargo.log"'
