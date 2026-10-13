@@ -22,10 +22,14 @@
 #     exchange and game with --local-log <path> (D-109: GitHub-hosted Actions dropped; the log is bin/local-gate's):
 #     the log replaces this whole step, so neither the check runs nor the legacy status is read. A readable, non-empty
 #     file with no line starting "check: FAILED", none starting "[FAIL]", none matching "^verify:.* [1-9][0-9]*
-#     failed$"; >= 1 line "check: OK"; >= 1 line "verify:<id> — N ok, 0 failed" (<id> lowercase letters and digits, N
-#     >= 1, the em dash U+2014 as the instruments print it); >= 1 gate-head line and every one exactly "gate-head:
-#     <sha>". Integrator-attested like the smoke log, bound to the SHA by gate-head. Without --local-log exchange and
-#     game keep the check-runs path above (a self-hosted runner can revive it).
+#     failed$"; >= 1 line "check: OK"; >= 1 line "verify:<id> — N ok, 0 failed" (<id> ^[a-z][a-z0-9_]*$ as the game's
+#     m2_2, N >= 1, the em dash U+2014 as the instruments print it); >= 1 gate-head line and every one exactly
+#     "gate-head: <sha>"; >= 1 gate-tree line and every one exactly "gate-tree: clean"; no line starting "gate-verdict:
+#     red" and exactly one line starting "gate-verdict:", which is "gate-verdict: green <id>", with a passing
+#     "verify:<id> — N ok, 0 failed" line for that same <id> (chained instruments print green verify lines of their own
+#     before the outer run fails, so only local-gate's verdict says the gate passed). Integrator-attested like the smoke
+#     log, bound to the SHA by gate-head. Without --local-log exchange and game keep the check-runs path above (a
+#     self-hosted runner can revive it).
 #  4. The label founder-approved is required for a milestone PR (head integration/*) and for any PR whose files
 #     (gh api --paginate .../pulls/<pr>/files, as many as changedFiles) include .github/**, .claude/** or a CODEOWNERS
 #     file (also as a rename's previous name). Label timing: the newest entry of the branch's activity
@@ -36,8 +40,9 @@
 #     the founder applies labels. This script never writes to GitHub except the merge itself.
 #  5. --milestone <mN> (D-088 item 7):
 #     a. a nightly.yml run whose head_sha = <sha> has job(s) named chain, every one completed with success; with
-#        --local-log instead (D-109; the nightly runs are not read): a line of the log, passing as in 3, names <mN>
-#        ("verify:<mN> — N ok, 0 failed"), so the same log is the full-chain evidence;
+#        --local-log instead (D-109; the nightly runs are not read): the log's gate verdict, checked as in 3, is
+#        "gate-verdict: green <mN>" (so its passing "verify:<mN> — N ok, 0 failed" line too), so the same log is the
+#        full-chain evidence;
 #     b. docs/md-reports/<mN>-milestone-review.md at <sha> (contents API, base64) carries "codex-last-read: <X>" (one
 #        value, 40 hex) where X = <sha>, or GitHub's compare X...<sha> is "ahead" and lists only that review file (a
 #        commit cannot contain its own SHA, so the commit recording Codex's review is the one change allowed after X);
@@ -153,8 +158,8 @@ elif [ $llog_set -eq 1 ]; then
   vbad=$(lmatch '^verify:.* [1-9][0-9]* failed$') || exit 2
   [ -z "$vbad" ] || refuse "local log $llog has $(printf '%s\n' "$vbad" | wc -l | tr -d ' ') verify line(s) with failures (first: $(printf '%s\n' "$vbad" | head -n 1))"
   n=$(lcount '^check: OK$') || exit 2; [ "$n" -ge 1 ] || refuse "local log $llog has no check: OK line"
-  # The passing verify lines, kept for 5a: N >= 1 (a number with a non-zero digit), exactly the em dash.
-  vok=$(lmatch '^verify:[a-z0-9]+ — [0-9]*[1-9][0-9]* ok, 0 failed$') || exit 2
+  # The passing verify lines: ids as local-gate's, N >= 1 (a number with a non-zero digit), exactly the em dash.
+  vok=$(lmatch '^verify:[a-z][a-z0-9_]* — [0-9]*[1-9][0-9]* ok, 0 failed$') || exit 2
   [ -n "$vok" ] || refuse "local log $llog has no passing verify line (verify:<id> — N ok, 0 failed with N >= 1)"
   heads=$(lmatch '^gate-head:') || exit 2
   [ -n "$heads" ] || refuse "local log $llog has no gate-head line"
@@ -165,6 +170,21 @@ elif [ $llog_set -eq 1 ]; then
     [ ${#ov} -eq 40 ] || refuse "local log $llog has a gate-head line that is not 'gate-head: <40 lowercase hex>': $other"
     refuse "local log $llog is for $ov, not $sha"
   fi
+  # The tree at the end of the gate: every gate-tree line is clean.
+  trees=$(lmatch '^gate-tree:') || exit 2
+  [ -n "$trees" ] || refuse "local log $llog has no gate-tree: clean line"
+  dirty=$(printf '%s\n' "$trees" | grep -vx -- 'gate-tree: clean' | head -n 1)
+  [ -z "$dirty" ] || refuse "local log $llog has $dirty, not gate-tree: clean"
+  # The gate's own verdict: no red one, exactly one verdict line, green, its id (kept for 5a) with a passing verify line.
+  vred=$(lmatch '^gate-verdict: red') || exit 2
+  [ -z "$vred" ] || refuse "local log $llog has a red gate verdict ($(printf '%s\n' "$vred" | head -n 1))"
+  vgreen=$(lmatch '^gate-verdict: green [a-z][a-z0-9_]*$') || exit 2
+  [ -n "$vgreen" ] || refuse "local log $llog has no gate-verdict: green line"
+  n=$(lcount '^gate-verdict:') || exit 2
+  [ "$n" -eq 1 ] || refuse "local log $llog has $n gate-verdict lines (exactly one gate-verdict: green <id> expected)"
+  vid=${vgreen#gate-verdict: green }
+  printf '%s\n' "$vok" | cut -d' ' -f1 | grep -Fqx -- "verify:$vid" \
+    || refuse "local log $llog has no verify:$vid — N ok, 0 failed line for its gate-verdict: green $vid"
 else
   pinned='["rust / check","rust / secrets","rust / web"]'
   case "$r" in ephremdeme/exchange) chain=true;; *) chain=false;; esac
@@ -221,10 +241,9 @@ gh_content() { # gh_content <path> <outfile>: the file at <sha> from the content
 }
 if [ $ms_set -eq 1 ]; then
   # a. The full sequential chain on the exact head: every chain job of one run green; with a local gate log (D-109),
-  # one of its passing verify lines names <mN> (the log's gate-head already bound it to the head in 3).
+  # its one green verdict names <mN> (3 bound the log to the head and the verdict to a passing verify:<mN> line).
   if [ $llog_set -eq 1 ]; then
-    printf '%s\n' "$vok" | cut -d' ' -f1 | grep -Fqx -- "verify:$ms" \
-      || refuse "local log $llog has no verify:$ms — N ok, 0 failed line (the full chain of $ms)"
+    [ "$vid" = "$ms" ] || refuse "local log $llog has gate-verdict: green $vid, not $ms (the full chain of $ms is required)"
   else
     gh_read "gh api nightly.yml runs" "$tmp/nightly.json" api --paginate "repos/$r/actions/workflows/nightly.yml/runs?head_sha=$sha&per_page=100"
     runs=$(jq -rs --arg s "$sha" "$DEFS"' pages("workflow_runs") | if .err then error(.err) else

@@ -4,20 +4,28 @@
 # the machine build lock (bin/with-build-lock), then the full chain `bash scripts/verify/<mN>.sh` (no --section; the
 # instrument takes the verify and build locks itself), with VERIFY_FAIL_TAIL=${VERIFY_FAIL_TAIL:-400} exported, both
 # outputs appended to the fresh file <log>. The log starts with `free -m` (memory, not disk, is the machine's limit:
-# the exchange OOM history) and always ends, green or red, with "gate-head: <full SHA of HEAD at the start>" and
-# "gate-tree: clean" (the precondition below; instruments may leave untracked artifacts, so it is not re-read), so a
-# red log is evidence too. If HEAD moved during the run, the SHA at the end gets a second gate-head line, so the log
-# matches no single head. `merge-pr --local-log` reads these lines; the evidence is integrator-attested, bound to the
-# SHA by gate-head.
-# Refused (exit 2, "local-gate: refused — <reason>", nothing run and no log written) unless: <mN> is lowercase
-# letters and digits; VERIFY_FAIL_TAIL is a positive integer; <repo-dir> is the top level of a git checkout with a
-# commit and `git status` reads it; its tree is clean apart from an untracked TASK.md at the top (the first other
-# status line is named); standards/bin/check and scripts/verify/<mN>.sh exist; <log> does not exist (not even as a
-# dangling link) and can be created.
-# Exit 0, "local-gate: OK <mN> <sha> <log>", only if HEAD did not move, check printed "check: OK" and no "check:
-# FAILED" and exited 0, the log has no "[FAIL]" line and no verify line with a failed count above 0, it has a line
-# "verify:<mN> — N ok, 0 failed" with N >= 1, and the instrument exited 0. Otherwise exit 1, "local-gate: RED <mN>
-# <sha> — <first reason> (log <log>)", also when the log cannot be read or written.
+# the exchange OOM history) and always ends, green or red, with "gate-head: <full SHA of HEAD at the start>", one
+# "gate-tree: clean" or "gate-tree: dirty (<first path>)" and one "gate-verdict: green <mN>" or "gate-verdict: red —
+# <first reason>", so a red log is evidence too. The verdict is decided before these lines are written, from the log
+# and what only the gate sees (the exit codes, HEAD, the tree): chained instruments print green verify lines of their
+# own before the outer run starts, and the outer run can die (a lock refusal, a kill) or exit non-zero after a green
+# line, so only the verdict says the gate passed. The tree is re-read at the end, tracked files only (`git status
+# --porcelain --untracked-files=no --ignore-submodules=none`; instruments may leave untracked artifacts): clean means
+# that status is empty and HEAD did not move; otherwise "dirty (<first path>)", "dirty (HEAD moved)" or "dirty (git
+# status failed)". If HEAD moved during the run, the SHA at the end gets a second gate-head line, so the log matches no
+# single head. `merge-pr --local-log` reads these lines; the evidence is integrator-attested, bound to the SHA by
+# gate-head.
+# Refused (exit 2, "local-gate: refused — <reason>", nothing run and no log written) unless: <mN> matches
+# ^[a-z][a-z0-9_]*$ (a lowercase letter, then lowercase letters, digits or _: the game's m2_2 too); VERIFY_FAIL_TAIL is
+# a positive integer; <repo-dir> is the top level of a git checkout with a commit and `git status` reads it; its tree
+# is clean apart from an untracked TASK.md at the top (the first other status line is named); standards/bin/check and
+# scripts/verify/<mN>.sh exist; <log> does not exist (not even as a dangling link) and can be created.
+# Exit 0, "local-gate: OK <mN> <sha> <log>", only if HEAD did not move, the tree is clean at the end, check printed
+# "check: OK" and no "check: FAILED" and exited 0, the log has no "[FAIL]" line and no verify line with a failed count
+# above 0, it has a line "verify:<mN> — N ok, 0 failed" with N >= 1, and the instrument exited 0. Otherwise exit 1,
+# "local-gate: RED <mN> <sha> — <first reason> (log <log>)", the same reason as the verdict line's, also when the log
+# cannot be read, and "the log could not be written" when the trailing lines fail (merge-pr refuses a log without
+# exactly one green verdict).
 set -u
 PATH="$HOME/.cargo/bin:$PATH"; export PATH
 LC_ALL=C; export LC_ALL
@@ -25,7 +33,7 @@ here=$(cd "$(dirname "$0")" && pwd -P) || { echo "local-gate: cannot locate its 
 refuse() { echo "local-gate: refused — $1" >&2; exit 2; }
 [ $# -eq 3 ] || { echo "local-gate: usage: local-gate <repo-dir> <mN> <log>" >&2; exit 2; }
 dir=$1; ms=$2; log=$3
-case "$ms" in ''|*[!a-z0-9]*) refuse "'$ms' is not a milestone id (lowercase letters and digits)";; esac
+case "$ms" in ''|[!a-z]*|*[!a-z0-9_]*) refuse "'$ms' is not a milestone id (a lowercase letter, then lowercase letters, digits or _)";; esac
 VERIFY_FAIL_TAIL=${VERIFY_FAIL_TAIL:-400}
 case "$VERIFY_FAIL_TAIL" in 0*|*[!0-9]*) refuse "VERIFY_FAIL_TAIL must be a positive integer, got '$VERIFY_FAIL_TAIL'";; esac
 export VERIFY_FAIL_TAIL
@@ -43,24 +51,40 @@ dirt=$(printf '%s\n' "$st" | grep -vx '?? TASK.md' | grep . | head -n 1)
 if [ -e "$log" ] || [ -L "$log" ]; then refuse "$log exists; the gate writes a fresh log only"; fi
 # noclobber: the log is created here or not at all, never truncated.
 ( set -C; : > "$log" ) 2>/dev/null || refuse "cannot create the log $log"
+red() { echo "local-gate: RED $ms $head — $1 (log $log)" >&2; exit 1; }
 free -m >> "$log" 2>&1 || echo "local-gate: free -m failed (exit $?)" >> "$log"
 ( cd "$dir" && sh "$here/with-build-lock" sh standards/bin/check ) < /dev/null >> "$log" 2>&1; crc=$?
 ( cd "$dir" && bash "scripts/verify/$ms.sh" ) < /dev/null >> "$log" 2>&1; irc=$?
 end=$(git -C "$dir" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || end=unreadable
-red() { echo "local-gate: RED $ms $head — $1 (log $log)" >&2; exit 1; }
-{ printf 'gate-head: %s\n' "$head"; if [ "$end" != "$head" ]; then printf 'gate-head: %s\n' "$end"; fi; printf 'gate-tree: clean\n'; } >> "$log" \
-  || red "the log could not be written"
-# The verdict reads the log as merge-pr --local-log does, plus the exit codes only the gate sees.
+# The tree at the end: tracked files only, and HEAD where it started; a failing git status is dirt (fail closed).
+tree=clean; tree_why=
+if est=$(git -C "$dir" status --porcelain --untracked-files=no --ignore-submodules=none 2>/dev/null); then
+  first=$(printf '%s\n' "$est" | grep . | head -n 1)
+  if [ -n "$first" ]; then tree="dirty (${first#???})"; tree_why="the tree is not clean at the end (first: ${first#???})"
+  elif [ "$end" != "$head" ]; then tree="dirty (HEAD moved)"
+  fi
+else tree="dirty (git status failed)"; tree_why="git status failed at the end"
+fi
+# The verdict, before the trailing lines: the log read as merge-pr --local-log reads it, plus what only the gate sees.
 cnt() { grep -c -E -- "$1" "$log"; [ $? -le 1 ]; }
+why=
 n_cfail=$(cnt '^check: FAILED') && n_cok=$(cnt '^check: OK$') && n_fail=$(cnt '^\[FAIL\]') \
   && n_vbad=$(cnt '^verify:.* [1-9][0-9]* failed$') && n_vok=$(cnt "^verify:$ms — [0-9]*[1-9][0-9]* ok, 0 failed\$") \
-  || red "the log could not be read"
-[ "$end" = "$head" ] || red "HEAD moved from $head to $end during the run"
-[ "$n_cfail" -eq 0 ] || red "check printed check: FAILED"
-[ "$n_cok" -ge 1 ] || red "check printed no check: OK line"
-[ $crc -eq 0 ] || red "check exited $crc"
-[ "$n_fail" -eq 0 ] || red "the log has $n_fail [FAIL] line(s)"
-[ "$n_vbad" -eq 0 ] || red "a verify line reports failures: $(grep -E '^verify:.* [1-9][0-9]* failed$' "$log" | head -n 1)"
-[ "$n_vok" -ge 1 ] || red "no verify:$ms — N ok, 0 failed line with N >= 1"
-[ $irc -eq 0 ] || red "scripts/verify/$ms.sh exited $irc"
+  || why="the log could not be read"
+if [ -n "$why" ]; then :
+elif [ "$end" != "$head" ]; then why="HEAD moved from $head to $end during the run"
+elif [ -n "$tree_why" ]; then why=$tree_why
+elif [ "$n_cfail" -ne 0 ]; then why="check printed check: FAILED"
+elif [ "$n_cok" -lt 1 ]; then why="check printed no check: OK line"
+elif [ $crc -ne 0 ]; then why="check exited $crc"
+elif [ "$n_fail" -ne 0 ]; then why="the log has $n_fail [FAIL] line(s)"
+elif [ "$n_vbad" -ne 0 ]; then why="a verify line reports failures: $(grep -E '^verify:.* [1-9][0-9]* failed$' "$log" | head -n 1)"
+elif [ "$n_vok" -lt 1 ]; then why="no verify:$ms — N ok, 0 failed line with N >= 1"
+elif [ $irc -ne 0 ]; then why="scripts/verify/$ms.sh exited $irc"
+fi
+if [ -z "$why" ]; then verdict="green $ms"; else verdict="red — $why"; fi
+{ printf 'gate-head: %s\n' "$head"; if [ "$end" != "$head" ]; then printf 'gate-head: %s\n' "$end"; fi
+  printf 'gate-tree: %s\n' "$tree"; printf 'gate-verdict: %s\n' "$verdict"; } >> "$log" \
+  || red "the log could not be written"
+[ -z "$why" ] || red "$why"
 echo "local-gate: OK $ms $head $log"
