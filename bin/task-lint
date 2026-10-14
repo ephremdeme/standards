@@ -6,7 +6,10 @@
 # `task-lint: OK (<wt>)` exit 0, or `task-lint: FAILED (<n> rule(s))` exit 1. Usage errors exit 2.
 # Rules: header (lines 1-3 Branch:/Base:/Risk: LOW|HIGH, one Risk: line in the TASK), branch (<model>/<slug>, equal to
 # the worktree's), base (full sha, a commit here, an ancestor of HEAD), owned (bin/owned-paths accepts §3's block),
-# sections (## 1. to ## 7.), clean (nothing uncommitted but an untracked TASK.md), submodule (every submodule at the
+# sections (## 1. to ## 7.), complexity (exactly one Complexity: low|medium|high line, in §2), tags (exactly one Tags:
+# line in §2 — none, or a comma-separated list from sql authz privacy input crypto destructive checker supply-chain, no
+# duplicates; a ds/ lane must be none; docs/07 §1 R6, R1; exchange BACKLOG 44), clean (nothing uncommitted but an
+# untracked TASK.md), submodule (every submodule at the
 # commit HEAD records), disk (15 GB free on the worktree's filesystem; no override exists). Every git/df failure is a
 # FAIL, never a pass (capture first, then filter).
 set -u
@@ -65,6 +68,53 @@ for n in 1 2 3 4 5 6 7; do
   if ! grep -Eq "^## $n\\.( |\$)" "$task"; then fail sections "missing heading ## $n."; sfail=1; fi
 done
 [ $sfail -eq 0 ] || count
+
+# complexity, tags (docs/07 §1 R6, R1; exchange BACKLOG 44). §2 = the lines after the first `## 2.` heading up to the
+# next `## ` heading (or EOF); s2 holds their line numbers. A line outside §2 still counts, so a TASK cannot hide one.
+s2=$(awk 'f && /^## / { exit } f { print NR } !f && (/^## 2\.$/ || /^## 2\. /) { f = 1 }' "$task"); s2rc=$?
+# field <rule> <key> <hint>: one FAIL line and return 1, or fv = the value of the one `<key>: ` line, inside §2.
+field() {
+  fm=$(grep -n "^$2: " "$task"); frc=$?
+  if [ $frc -gt 1 ] || [ $s2rc -ne 0 ]; then fail "$1" "could not read the $2: lines of $task"; count; return 1; fi
+  if [ -z "$fm" ]; then fail "$1" "no $2: line in §2 ($3)"; count; return 1; fi
+  fn=$(printf '%s\n' "$fm" | grep -c '^[0-9][0-9]*:') || fn=""
+  case "$fn" in ''|0|*[!0-9]*) fail "$1" "could not read the $2: lines of $task"; count; return 1;; esac
+  if [ "$fn" -gt 1 ]; then fail "$1" "$fn $2: lines, exactly one in §2 is required"; count; return 1; fi
+  if ! printf '%s\n' "$s2" | grep -qx -- "${fm%%:*}"; then fail "$1" "the $2: line is outside §2"; count; return 1; fi
+  fv=${fm#*:}; fv=${fv#"$2: "}; return 0
+}
+if field complexity Complexity 'Complexity: low|medium|high'; then
+  case "$fv" in low|medium|high) ;; *) fail complexity "'$fv' is not low, medium or high"; count;; esac
+fi
+vocab='sql authz privacy input crypto destructive checker supply-chain'
+if field tags Tags "Tags: none, or a comma-separated list from $vocab"; then
+  tbad=""   # the value is trimmed of leading and trailing spaces (Complexity's is not)
+  while :; do case "$fv" in " "*) fv=${fv# };; *) break;; esac; done
+  while :; do case "$fv" in *" ") fv=${fv% };; *) break;; esac; done
+  case "$fv" in
+    *[!\ ]*) ;;
+    *) tbad="empty Tags: line (Tags: none, or a comma-separated list from $vocab)";;
+  esac
+  if [ -z "$tbad" ] && [ "$fv" != none ]; then
+    rest=$fv; seen=" "
+    while :; do
+      case "$rest" in *,*) tok=${rest%%,*}; rest=${rest#*,}; more=1;; *) tok=$rest; more=0;; esac
+      while :; do case "$tok" in " "*) tok=${tok# };; *) break;; esac; done
+      while :; do case "$tok" in *" ") tok=${tok% };; *) break;; esac; done
+      case "$tok" in
+        none) tbad="'none' stands alone";;
+        sql|authz|privacy|input|crypto|destructive|checker|supply-chain)
+          case "$seen" in *" $tok "*) tbad="'$tok' listed twice";; *) seen="$seen$tok ";; esac;;
+        *) tbad="'$tok' is not one of $vocab";;
+      esac
+      [ -z "$tbad" ] && [ $more -eq 1 ] || break
+    done
+  fi
+  if [ -z "$tbad" ] && [ "$fv" != none ]; then
+    case "$l1" in "Branch: ds/"*) tbad="a ds/ lane must be untagged (Tags: none), got '$fv' (docs/07 R1)";; esac
+  fi
+  if [ -n "$tbad" ]; then fail tags "$tbad"; count; fi
+fi
 
 # clean
 if st=$(git -C "$wt" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null); then
