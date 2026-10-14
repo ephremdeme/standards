@@ -20,13 +20,21 @@ P="$T/p"; git init -q -b main "$P"; printf '.worktrees/\n' > "$P/.gitignore"; ec
 git -C "$P" add -A; git -C "$P" commit -qm base; B=$(git -C "$P" rev-parse HEAD)
 git -C "$P" checkout -q -b side; echo s > "$P/side.txt"; git -C "$P" add -A; git -C "$P" commit -qm side; SIDE=$(git -C "$P" rev-parse HEAD); git -C "$P" checkout -q main
 git -C "$P" worktree add -q "$P/.worktrees/opus-x" -b opus/x main; W="$P/.worktrees/opus-x"
+git -C "$P" worktree add -q "$P/.worktrees/ds-z" -b ds/z main; DW="$P/.worktrees/ds-z"
 Q3='```'
-# task <branch> <base> <risk line> [omit section n] [owned line]: a TASK with headings 1-7 and an owned-paths block.
+NL='
+'
+D2="Complexity: low${NL}Tags: none"
+# task <branch> <base> <risk line> [omit section n] [owned line] [§2's lines] [an extra line in §4]: a TASK with headings
+# 1-7, §2's Complexity:/Tags: lines (default: low and none) and an owned-paths block.
 task(){ { printf 'Branch: %s\nBase: %s\n%s\n\n' "$1" "$2" "$3"
   for n in 1 2 3 4 5 6 7; do
     [ "$n" = "${4:-}" ] && continue
     printf '## %s. Section %s\n' "$n" "$n"
-    if [ "$n" = 3 ] && [ "${5:-}" != NONE ]; then printf '%sowned\n%s\n%s\n' "$Q3" "${5:-README.md}" "$Q3"; else echo '- x'; fi; echo
+    [ "$n" = 2 ] && printf '%s\n' "${6-$D2}"
+    if [ "$n" = 3 ] && [ "${5:-}" != NONE ]; then printf '%sowned\n%s\n%s\n' "$Q3" "${5:-README.md}" "$Q3"; else echo '- x'; fi
+    [ "$n" = 4 ] && [ -n "${7:-}" ] && printf '%s\n' "$7"
+    echo
   done; } > "$W/TASK.md"; }
 task opus/x "$B" 'Risk: LOW'
 want "a valid lane -> task-lint: OK" 0 "^task-lint: OK \($W\)\$" lint "$W"
@@ -63,6 +71,55 @@ task opus/x '<x>' 'Risk: LOW' 6
 out=$(lint "$W" 2>&1); rc=$?
 if [ $rc -eq 1 ] && printf '%s\n' "$out" | grep -q '^task-lint: FAIL base: ' && printf '%s\n' "$out" | grep -q '^task-lint: FAIL sections: missing heading ## 6\.$' && printf '%s\n' "$out" | grep -q '^task-lint: FAILED (2 rule(s))$'; then
   ok "two failures in one run -> both lines and FAILED (2 rule(s))"; else bad "two failures in one run (rc=$rc)"; printf '%s\n' "$out" | sed 's/^/        /'; fi
+# complexity and tags (docs/07 §1 R6, R1; exchange BACKLOG 44): exactly one line each, inside §2, closed vocabulary.
+V='sql authz privacy input crypto destructive checker supply-chain'
+task opus/x "$B" 'Risk: LOW' '' '' "Complexity: medium${NL}Tags: sql, privacy"
+want "Tags: sql, privacy -> OK" 0 "^task-lint: OK \($W\)\$" lint "$W"
+task opus/x "$B" 'Risk: LOW' '' '' "Complexity: high${NL}Tags: supply-chain"
+want "Tags: supply-chain -> OK" 0 "^task-lint: OK \($W\)\$" lint "$W"
+task opus/x "$B" 'Risk: LOW' '' '' 'Tags: none'
+want "control: no Complexity: line -> FAIL complexity" 1 '^task-lint: FAIL complexity: no Complexity: line in §2 \(Complexity: low\|medium\|high\)$' lint "$W"
+task opus/x "$B" 'Risk: LOW' '' '' "Complexity: MEDIUM${NL}Tags: none"
+want "control: Complexity: MEDIUM -> FAIL complexity naming it" 1 "^task-lint: FAIL complexity: 'MEDIUM' is not low, medium or high\$" lint "$W"
+task opus/x "$B" 'Risk: LOW' '' '' "Complexity: low${NL}Complexity: low${NL}Tags: none"
+want "control: two Complexity: lines -> FAIL complexity (2 lines)" 1 '^task-lint: FAIL complexity: 2 Complexity: lines, exactly one in §2 is required$' lint "$W"
+task opus/x "$B" 'Risk: LOW' '' '' 'Tags: none' 'Complexity: low'
+want "control: Complexity: line in §4 only -> FAIL complexity (outside §2)" 1 '^task-lint: FAIL complexity: the Complexity: line is outside §2$' lint "$W"
+task opus/x "$B" 'Risk: LOW' '' '' 'Complexity: low'
+want "control: no Tags: line -> FAIL tags" 1 "^task-lint: FAIL tags: no Tags: line in §2 \(Tags: none, or a comma-separated list from $V\)\$" lint "$W"
+task opus/x "$B" 'Risk: LOW' '' '' "Complexity: low${NL}Tags: privcy"
+want "control: Tags: privcy -> FAIL tags naming it" 1 "^task-lint: FAIL tags: 'privcy' is not one of $V\$" lint "$W"
+task opus/x "$B" 'Risk: LOW' '' '' "Complexity: low${NL}Tags: none, sql"
+want "control: Tags: none, sql -> FAIL tags ('none' stands alone)" 1 "^task-lint: FAIL tags: 'none' stands alone\$" lint "$W"
+task opus/x "$B" 'Risk: LOW' '' '' "Complexity: low${NL}Tags: privacy, privacy"
+want "control: Tags: privacy, privacy -> FAIL tags (listed twice)" 1 "^task-lint: FAIL tags: 'privacy' listed twice\$" lint "$W"
+task opus/x "$B" 'Risk: LOW' '' '' "Complexity: low${NL}Tags: sql,"
+want "control: Tags: sql, -> FAIL tags (empty token)" 1 "^task-lint: FAIL tags: '' is not one of $V\$" lint "$W"
+task opus/x "$B" 'Risk: LOW' '' '' 'Complexity: low'; printf 'Tags: none\n' >> "$W/TASK.md"
+want "control: Tags: line in §7 only -> FAIL tags (outside §2)" 1 '^task-lint: FAIL tags: the Tags: line is outside §2$' lint "$W"
+task opus/x "$B" 'Risk: LOW' '' '' "Complexity: low${NL}Tags: "
+want "control: empty Tags: line -> FAIL tags" 1 "^task-lint: FAIL tags: empty Tags: line \(Tags: none, or a comma-separated list from $V\)\$" lint "$W"
+task opus/x "$B" 'Risk: LOW' 2
+out=$(lint "$W" 2>&1); rc=$?
+if [ $rc -eq 1 ] && printf '%s\n' "$out" | grep -q '^task-lint: FAIL sections: missing heading ## 2\.$' \
+   && printf '%s\n' "$out" | grep -q '^task-lint: FAIL complexity: no Complexity: line in §2 (Complexity: low|medium|high)$' \
+   && printf '%s\n' "$out" | grep -q "^task-lint: FAIL tags: no Tags: line in §2 (Tags: none, or a comma-separated list from $V)\$" \
+   && printf '%s\n' "$out" | grep -q '^task-lint: FAILED (3 rule(s))$'; then
+  ok "control: missing ## 2. heading -> FAIL sections, FAIL complexity, FAIL tags (3 rules)"
+else bad "control: missing ## 2. heading -> FAIL sections, FAIL complexity, FAIL tags (3 rules) (rc=$rc)"; printf '%s\n' "$out" | sed 's/^/        /'; fi
+W=$DW
+task ds/z "$B" 'Risk: LOW' '' '' "Complexity: low${NL}Tags: privacy"
+want "control: a ds/ lane with Tags: privacy -> FAIL tags (R1 untagged)" 1 "^task-lint: FAIL tags: a ds/ lane must be untagged \(Tags: none\), got 'privacy' \(docs/07 R1\)\$" lint "$W"
+task ds/z "$B" 'Risk: LOW'
+want "a ds/ lane with Tags: none -> OK" 0 "^task-lint: OK \($W\)\$" lint "$W"
+task ds/z "$B" 'Risk: LOW' '' '' "Complexity: low${NL}Tags: none, sql"
+want "control: a ds/ lane with Tags: none, sql -> FAIL tags (none stands alone, before the ds/ rule)" 1 "^task-lint: FAIL tags: 'none' stands alone\$" lint "$W"
+W="$P/.worktrees/opus-x"
+# Revision: the Tags value is trimmed before the none check and the split; the Complexity value is not.
+task opus/x "$B" 'Risk: LOW' '' '' "Complexity: low${NL}Tags: none "
+want "Tags: none  (trailing space) -> OK" 0 "^task-lint: OK \($W\)\$" lint "$W"
+task opus/x "$B" 'Risk: LOW' '' '' "Complexity: low ${NL}Tags: none"
+want "control: Complexity: low  (trailing space) -> FAIL complexity naming it" 1 "^task-lint: FAIL complexity: 'low ' is not low, medium or high\$" lint "$W"
 want "control: no argument -> usage, exit 2" 2 '^task-lint: usage: task-lint <absolute worktree>$' lint
 want "control: a relative worktree path -> usage, exit 2" 2 '^task-lint: usage: task-lint <absolute worktree>$' lint p/.worktrees/opus-x
 mkdir "$T/empty"

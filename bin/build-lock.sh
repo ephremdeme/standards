@@ -85,9 +85,12 @@ _bl_cleanfail() { echo "build-lock: could not clean the previous worktree's work
 
 # Shared target dir, switch clean and sccache for the cargo commands the caller runs next (call after acquiring).
 build_lock_env() {
-  # sccache is looked for the way cargo is below: on PATH, then in $HOME/.cargo/bin (appended, so the caller's own tools
-  # keep precedence). Installed there but missing from PATH, the cache was silently off (2026-10-13: 412 requests, 2
-  # hits). The line naming it puts "the cache is on" into every log that builds.
+  # cargo and sccache are looked for on PATH, then in $HOME/.cargo/bin (appended, so the caller's own tools keep
+  # precedence), on EVERY call: cargo only on a worktree switch made a later call in the same worktree fail `cargo: not
+  # found` (exchange BACKLOG 46 (b)). sccache installed there but missing from PATH left the cache silently off
+  # (2026-10-13: 412 requests, 2 hits). The line naming it puts "the cache is on" into every log that builds.
+  if ! command -v cargo >/dev/null 2>&1 && [ -x "${HOME:-/nonexistent}/.cargo/bin/cargo" ]; then
+    PATH="$PATH:$HOME/.cargo/bin"; export PATH; fi
   if [ -z "${RUSTC_WRAPPER+x}" ]; then
     if ! command -v sccache >/dev/null 2>&1 && [ -x "${HOME:-/nonexistent}/.cargo/bin/sccache" ]; then
       PATH="$PATH:$HOME/.cargo/bin"; export PATH; fi
@@ -109,11 +112,9 @@ build_lock_env() {
   _bl_stamp="$CARGO_TARGET_DIR/.standards-worktree"
   _bl_prev=$(cat "$_bl_stamp" 2>/dev/null) || _bl_prev=""
   [ "$_bl_prev" != "$_bl_top" ] || return 0
-  # A different (or unknown) worktree built last: clean every workspace member before anything builds here. Cargo is
-  # looked for on PATH, then in $HOME/.cargo/bin (appended, so the caller's own cargo keeps precedence); a cargo the
-  # caller can reach only by an absolute path would otherwise skip the clean — so a missing cargo refuses (fail closed).
-  if ! command -v cargo >/dev/null 2>&1 && [ -x "${HOME:-/nonexistent}/.cargo/bin/cargo" ]; then
-    PATH="$PATH:$HOME/.cargo/bin"; export PATH; fi
+  # A different (or unknown) worktree built last: clean every workspace member before anything builds here. Cargo was
+  # looked for at the top (PATH, then $HOME/.cargo/bin); a cargo the caller can reach only by an absolute path would
+  # otherwise skip the clean — so a missing cargo refuses (fail closed).
   command -v cargo >/dev/null 2>&1 || {
     echo "build-lock: cargo is not on PATH or in \$HOME/.cargo/bin, so the previous worktree's workspace crates cannot be cleaned; nothing was built" >&2; return 1; }
   command -v jq >/dev/null 2>&1 || { echo "build-lock: jq is required to list the workspace crates" >&2; _bl_cleanfail; return 1; }

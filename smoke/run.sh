@@ -286,7 +286,7 @@ DS_API_KEY=dummy DISPATCH_DRY_RUN=1 sh -c "$DD $W" >$T/o 2>&1; [ $? -eq 2 ] && g
 # §3 and a §5 naming the instrument section (task-lint, C7).
 # mktask <risk> <§5 line> [<owned paths, one per line; NONE = no block; default web/src/components/>] [<extra line, in
 # §3 outside the block and in §4>]
-mktask(){ { printf 'Branch: ds/ui-button\nBase: %s\nRisk: %s\n\n## 1. Read first\n- nothing\n\n## 2. What this is\nsmoke lane\n\n## 3. Files you own\n%s\n' "$(git rev-parse main)" "$1" "${4:-}"
+mktask(){ { printf 'Branch: ds/ui-button\nBase: %s\nRisk: %s\n\n## 1. Read first\n- nothing\n\n## 2. What this is\nComplexity: low\nTags: none\nsmoke lane\n\n## 3. Files you own\n%s\n' "$(git rev-parse main)" "$1" "${4:-}"
   if [ "${3:-web/src/components/}" != NONE ]; then printf '```owned\n%s\n```\n' "${3:-web/src/components/}"; fi
   printf '\n## 4. Hard rules\n- none\n%s\n\n## 5. Verify\n- %s\n\n## 6. Commit subject\nchore: smoke\n\n## 7. Binding facts\n- none\n' "${4:-}" "$2"; } > "$W/TASK.md"; }
 mktask LOW 'scripts/verify/m0.sh --section web'
@@ -409,7 +409,7 @@ if git clone -q "$H" "$SD" >/dev/null 2>&1 && git -C "$SD" rev-list --max-parent
   git -C "$SD" worktree add -q "$SW" -b ds/docs-lane; SDR=$(cd "$SD" && pwd -P); SWB=$(git -C "$SW" rev-parse HEAD)
   printf '{"projects":{"%s":{"hasTrustDialogAccepted":true},"%s":{"hasTrustDialogAccepted":true}}}\n' "${GR:-/nonexistent}" "$SDR" > "$T/h/.claude.json"
   mkstd(){ # mkstd <owned lines> <§5 line>: a standards lane TASK (header, headings 1-7, the owned-paths block)
-    printf 'Branch: ds/docs-lane\nBase: %s\nRisk: LOW\n\n## 1. Read first\n- docs/07-harness.md\n\n## 2. What this is\nsmoke docs lane\n\n## 3. Files you own\n```owned\n%s\n```\n\n## 4. Hard rules\n- none\n\n## 5. Verify\n- %s\n\n## 6. Commit subject\ndocs: smoke\n\n## 7. Binding facts\n- none\n' "$SWB" "$1" "$2" > "$SW/TASK.md"; }
+    printf 'Branch: ds/docs-lane\nBase: %s\nRisk: LOW\n\n## 1. Read first\n- docs/07-harness.md\n\n## 2. What this is\nComplexity: low\nTags: none\nsmoke docs lane\n\n## 3. Files you own\n```owned\n%s\n```\n\n## 4. Hard rules\n- none\n\n## 5. Verify\n- %s\n\n## 6. Commit subject\ndocs: smoke\n\n## 7. Binding facts\n- none\n' "$SWB" "$1" "$2" > "$SW/TASK.md"; }
   sd_run(){ # sd_run <label> <rc> <dry: 1|0> <regex>...: exit code and every regex; a dry run or a stub claude run
     sd_l=$1; sd_rc=$2; sd_dry=$3; shift 3
     HOME=$T/h DS_API_KEY=dummy DISPATCH_DRY_RUN=$sd_dry PATH="$T/stub:$PATH" sh -c "${SD_DD:-$DD} $SW" >$T/o 2>&1; rc=$?; sd_miss=""
