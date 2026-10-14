@@ -90,6 +90,12 @@ mkdir -p "$T/hs/.cargo/bin"; cp "$T/sc/sccache" "$T/hs/.cargo/bin/sccache"
 want "control: sccache only in \$HOME/.cargo/bin, not on PATH -> found and named" 0 "^build-lock: sccache $T/hs/\.cargo/bin/sccache\$" env HOME="$T/hs" sh -c 'cd "$1" && sh "$2" true' _ "$B" "$WBL"
 want "control: ... RUSTC_WRAPPER=sccache reaches the command, with \$HOME/.cargo/bin last on its PATH" 0 "^W=sccache P=$T/bin:/usr/bin:/bin:$T/hs/\.cargo/bin\$" \
   env HOME="$T/hs" sh -c 'cd "$1" && sh "$2" sh -c "echo W=\$RUSTC_WRAPPER P=\$PATH"' _ "$B" "$WBL"
+# Exchange BACKLOG 46 (b): $HOME/.cargo/bin reached PATH only on a worktree switch (or through the sccache lookup), so a
+# later call in the same worktree failed `cargo: not found`. Cargo and sccache only in $HOME/.cargo/bin, the caller's
+# RUSTC_WRAPPER=sccache, the stamp already naming B (no switch): cargo must still be found.
+mkdir -p "$T/hb/.cargo/bin"; cp "$T/bin/cargo" "$T/hb/.cargo/bin/cargo"; cp "$T/sc/sccache" "$T/hb/.cargo/bin/sccache"
+want "control: BACKLOG 46 (b): a second call in the same worktree, cargo only in \$HOME/.cargo/bin -> cargo found" 0 '^second-call-built W=sccache$' \
+  env HOME="$T/hb" PATH=/usr/bin:/bin RUSTC_WRAPPER=sccache sh -c 'cd "$1" && sh "$2" sh -c "cargo build && echo second-call-built W=\$RUSTC_WRAPPER"' _ "$B" "$WBL"
 want "a caller's RUSTC_WRAPPER and CARGO_TARGET_DIR are kept" 0 "^W=mine T=$T/mytarget\$" env RUSTC_WRAPPER=mine CARGO_TARGET_DIR="$T/mytarget" sh -c 'cd "$1" && sh "$2" sh -c "echo W=\$RUSTC_WRAPPER T=\$CARGO_TARGET_DIR"' _ "$B" "$WBL"
 want "control: no command -> usage, exit 2" 2 '^with-build-lock: usage: with-build-lock <command> \[args…\]$' sh "$WBL"
 # check takes the lock around its Rust steps: a foreign lock is a BLOCKED rust line and exit 1, never a skipped pass.

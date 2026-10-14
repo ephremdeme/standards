@@ -1,6 +1,6 @@
 Branch: <model>/<slug>
 Base: <sha of integration/mN>
-Risk: <set LOW or HIGH — from classify-risk on expected paths; coordinator may raise, never lower>
+Risk: <set LOW or HIGH — from classify-risk on expected paths; integrator may raise, never lower>
 
 ## 1. Read first (nothing else — only the files you edit plus the ones you must understand, one reason each; the contract is in §7)
 - standards/docs/05-domain-rules.md, standards/docs/06-code-quality.md
@@ -8,6 +8,8 @@ Risk: <set LOW or HIGH — from classify-risk on expected paths; coordinator may
 - <file> — <why>
 
 ## 2. What this is
+Complexity: <low | medium | high — the effort the milestone spec's matrix gives this lane; a DeepSeek lane is low or medium>
+Tags: <none — or a comma-separated list from: sql authz privacy input crypto destructive checker supply-chain; anything but none means one Opus `reviewer` pass (docs/07 §1); a ds/ lane must be none>
 <The behaviour this lane delivers, in plain words. Edge cases and abuse case.>
 
 ## 3. Files you own (touch nothing else; read only from the block below — prohibitions go to §4)
@@ -21,7 +23,7 @@ Risk: <set LOW or HIGH — from classify-risk on expected paths; coordinator may
 
 ## 5. Verify (three cycles: red batch of the new tests, green batch, controls; then once each at the end — report one line per command)
 - standards/bin/check --only <kind>   (<kind> = `standards/bin/owned-paths --kind TASK.md`: web, rust or all)
-- scripts/verify/mN.sh --section <lane>   (must go green; the coordinator runs every other section at merge)
+- scripts/verify/mN.sh --section <lane>   (must go green; the integrator runs every other section at merge)
 - <control test name(s) — database guards only — expected red with this assertion message: "…">
 
 ## 6. Commit subject
