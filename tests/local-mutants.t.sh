@@ -2,7 +2,8 @@
 # Cases for bin/local-mutants (exchange D-110, BACKLOG 40): disposable clones only; every cargo mutants call inside a
 # `systemd-run --user --scope --quiet` with MemoryMax, MemorySwapMax=0 and OOMPolicy=stop (never uncapped), the cap
 # read back from the scope's memory.max first; --no-config on both calls (the clone carries a .cargo/mutants.toml);
-# a 40-hex <base>; --in-diff over <base>..HEAD limited to <crate>/src, --jobs 1 --timeout 60, nextest, the replay
+# a 40-hex <base>; --in-diff over <base>..HEAD limited to <crate>/src, --jobs 1, no fixed --timeout (the
+# baseline runs uncapped; mutants get --minimum-test-timeout 60 --timeout-multiplier 2, exchange D-155), nextest, the replay
 # proptest excluded, optional --tests; cargo mutants' own baseline; sccache required unless MUTANTS_NO_SCCACHE=1;
 # Σ tested equal to --list; one run: line. PATH is only the stub systemd-run and links to system tools: cargo and
 # sccache exist only in the fake HOME's .cargo/bin, so a run proves the script put $HOME/.cargo/bin first and no real
@@ -176,7 +177,7 @@ printed "green: 6 listed = 4 caught + 2 unviable -> exit 0, one run: line (unvia
 check_ "... files: holds new.rs, changed with zero mutants (not gone.rs, notes.md, other/ or Cargo.toml)" 'grep -q " files: $FILES tested: " "$T/out" && ! grep -q "new\.rs" "$STUB/cargo.log"'
 check_ "... cargo and sccache were found in \$HOME/.cargo/bin; every cargo mutants call ran inside the scope with RUSTC_WRAPPER=sccache" '[ "$(grep -c "cargo mutants " "$STUB/cargo.log")" -eq 2 ] && ! grep "cargo mutants " "$STUB/cargo.log" | grep -qv "^scope=capped wrapper=\[sccache\] "'
 check_ "... every systemd-run call is --user --scope --quiet -p MemoryMax=3G -p MemorySwapMax=0 -p OOMPolicy=stop --, the first the cap probe" '[ "$(grep -c "" "$STUB/systemd-run.log")" -eq 3 ] && ! grep -qv "^systemd-run --user --scope --quiet -p MemoryMax=3G -p MemorySwapMax=0 -p OOMPolicy=stop -- " "$STUB/systemd-run.log" && [ "$(head -n 1 "$STUB/systemd-run.log")" = "$PROBE3" ]'
-check_ "... the run: --no-config, --in-diff, -p ledger, nextest, --jobs 1 --timeout 60, -o, the replay proptest excluded, no --test" 'grep -Eq "^scope=capped wrapper=\[sccache\] cargo mutants --no-config --in-diff [^ ]+/changes\.diff -p ledger --test-tool nextest --jobs 1 --timeout 60 -o [^ ]+ -- -E not test\(=random_sessions_match_model\)\$" "$STUB/cargo.log"'
+check_ "... the run: --no-config, --in-diff, -p ledger, nextest, --jobs 1, no fixed --timeout (--minimum-test-timeout 60 --timeout-multiplier 2), -o, the replay proptest excluded, no --test" 'grep -Eq "^scope=capped wrapper=\[sccache\] cargo mutants --no-config --in-diff [^ ]+/changes\.diff -p ledger --test-tool nextest --jobs 1 --minimum-test-timeout 60 --timeout-multiplier 2 -o [^ ]+ -- -E not test\(=random_sessions_match_model\)\$" "$STUB/cargo.log"'
 check_ "... cargo mutants runs its own baseline (no --baseline) and copies the tree (no --in-place)" '! grep -q -e --baseline -e --in-place "$STUB/cargo.log"'
 check_ "... --list ran first, with the same selection and --no-config" 'grep "cargo mutants " "$STUB/cargo.log" | head -n 1 | grep -Eq "^scope=capped wrapper=\[sccache\] cargo mutants --list --no-config --in-diff [^ ]+/changes\.diff -p ledger\$"'
 check_ "... the clone carries .cargo/mutants.toml and both cargo mutants calls carry --no-config" '[ -f "$C/.cargo/mutants.toml" ] && [ "$(grep -c "cargo mutants " "$STUB/cargo.log")" -eq 2 ] && [ "$(grep "cargo mutants " "$STUB/cargo.log" | grep -c -- " --no-config ")" -eq 2 ]'

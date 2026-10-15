@@ -1,7 +1,8 @@
 #!/bin/sh
 # Usage: standards/bin/local-mutants <clone> <base> <crate> [--tests <name>[,<name>...]]     (integrator; exchange D-110)
 # The local mutation run that replaces the Actions `mutants` workflow (dormant): `cargo mutants --in-diff` over
-# `git diff <base> HEAD -- <crate>/src` with `-p <crate> --test-tool nextest --jobs 1 --timeout 60`, the replay proptest
+# `git diff <base> HEAD -- <crate>/src` with `-p <crate> --test-tool nextest --jobs 1 --minimum-test-timeout 60
+# --timeout-multiplier 2`, the replay proptest
 # excluded from every test run (`-- -E 'not test(=random_sessions_match_model)'`, as the dormant workflow does), and
 # each --tests name passed on as `--test <name>` after `--`, so a mutant runs only those test binaries (without --tests,
 # the crate's whole suite). Both cargo mutants calls, the --list and the run, carry --no-config, as the dormant
@@ -15,6 +16,10 @@
 # /proc/self/cgroup)/memory.max'`), which must equal MUTANTS_MEMORY_MAX in bytes (K, M, G x 1024^n; a user manager
 # without the memory controller creates the scope and ignores the cap). cargo mutants runs its own baseline (no
 # --baseline=skip) in a copy of the tree (--in-place conflicts with --jobs) under the machine build lock
+# Timeout (exchange D-155): no fixed --timeout, which cargo mutants applies to the baseline's test run as well; a test
+# set whose clean run needs more than 60 s (E4's 31 binaries: about 2 min on blih-runner) then fails as "a red baseline"
+# with every test passing. The baseline runs uncapped and each mutant's tests get twice its measured time, at least 60 s
+# (a non-terminating mutant ends as a timeout, never caught; OOMPolicy=stop below still bounds its memory)
 # (bin/build-lock.sh), with RUSTC_WRAPPER=sccache: every run is cached unless MUTANTS_NO_SCCACHE=1 opts out. Residual: an sccache server already running outside the scope compiles outside the
 # cap; the tests, where runaways happen, always run inside it.
 # Only in a disposable clone (bin/mutants' rules: its own .git directory, no remote, clean tree, no other worktree),
@@ -124,7 +129,8 @@ n_of() { n=$(grep -c . "$1"); case "$n" in ''|*[!0-9]*) fail "could not read $1"
 listed=$(n_of "$out/list.txt") || exit 1
 c=0; m=0; u=0; k=0; mrc=0; o="$out/mutants.out"
 if [ "$listed" -gt 0 ]; then
-  scope cargo mutants --no-config --in-diff "$out/changes.diff" -p "$crate" --test-tool nextest --jobs 1 --timeout 60 -o "$out" \
+  scope cargo mutants --no-config --in-diff "$out/changes.diff" -p "$crate" --test-tool nextest --jobs 1 \
+    --minimum-test-timeout 60 --timeout-multiplier 2 -o "$out" \
     -- -E 'not test(=random_sessions_match_model)' $testargs > "$out/mutants.log" 2>&1; mrc=$?
   case $mrc in
     0|2|3) ;;
