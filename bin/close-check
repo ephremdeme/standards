@@ -15,7 +15,8 @@
 #   labels   gh pr view <pr> --repo <r> --json labels: founder-approved and human-gate-accepted both present (presence
 #            only; the timing rule is merge-pr's); the detail names the missing one(s). gh/jq failure = FAIL.
 #   The three reports below are read as committed at HEAD (`git show HEAD:<file>`, as merge-pr reads them at the sha
-#   through the contents API), never from the working tree: a file not committed at HEAD is a FAIL naming it.
+#   through the contents API), never from the working tree; only a blob is read (`git cat-file -t` = blob): a missing
+#   path or a tree is "FAIL <row> — <file> is not a file committed at HEAD".
 #   codex    docs/md-reports/<mN>-milestone-review.md holds exactly one line starting "codex-last-read:", which is
 #            "codex-last-read: <X>" (40 lowercase hex); PASS when X = HEAD, or X is a commit, an ancestor of HEAD, and
 #            `git diff --name-only X HEAD` lists nothing but that review file.
@@ -94,8 +95,8 @@ fail() { rows=$((rows + 1)); nfail=$((nfail + 1))
 g() { git -C "$abs" "$@"; }
 dec() { n=${1#"${1%%[!0]*}"}; echo "${n:-0}"; }   # strip leading zeros of a validated digit run
 # committed <rel>: the file as committed at HEAD into $doc (merge-pr reads it at the sha, never the working tree);
-# status 1 when it is not committed there or cannot be read.
-committed() { g cat-file -e "$head:$1" 2>/dev/null && g show "$head:$1" > "$doc" 2>/dev/null; }
+# status 1 when it is not a blob there (missing, or a tree whose entry names could mimic the lines) or cannot be read.
+committed() { [ "$(g cat-file -t "$head:$1" 2>/dev/null)" = blob ] && g cat-file blob "$head:$1" > "$doc" 2>/dev/null; }
 
 # head
 if st=$(g status --porcelain --untracked-files=no --ignore-submodules=none 2>/dev/null); then
@@ -139,7 +140,7 @@ row_labels
 # codex
 row_codex() {
   rel="docs/md-reports/$m-milestone-review.md"; f=$doc
-  committed "$rel" || { fail codex "$rel is not committed at HEAD"; return; }
+  committed "$rel" || { fail codex "$rel is not a file committed at HEAD"; return; }
   ln=$(grep -- '^codex-last-read:' "$f"); [ $? -le 1 ] || { fail codex "$rel could not be read"; return; }
   [ -n "$ln" ] || { fail codex "no codex-last-read line in $rel"; return; }
   c=$(printf '%s\n' "$ln" | wc -l | tr -d ' ')
@@ -160,7 +161,7 @@ row_codex
 # mutants
 row_mutants() {
   rel="docs/md-reports/$m-mutants.md"; f=$doc
-  committed "$rel" || { fail mutants "$rel is not committed at HEAD"; return; }
+  committed "$rel" || { fail mutants "$rel is not a file committed at HEAD"; return; }
   last=$(grep -v -- '^$' "$f"); [ $? -le 1 ] || { fail mutants "$rel could not be read"; return; }
   last=$(printf '%s\n' "$last" | tail -n 1)
   [ "$last" = "open survivors: 0" ] || { fail mutants "last line is '$last', not 'open survivors: 0'"; return; }
@@ -197,7 +198,7 @@ row_mutants
 # report
 row_report() {
   rel="docs/md-reports/$m.md"; f=$doc
-  committed "$rel" || { fail report "$rel is not committed at HEAD"; return; }
+  committed "$rel" || { fail report "$rel is not a file committed at HEAD"; return; }
   fc=$(grep -c -- '^full chain: ' "$f"); [ $? -le 1 ] || { fail report "$rel could not be read"; return; }
   tk=$(grep -c -E -- '^Tokens: integrator avg_ctx=[0-9]+k calls_per_merge=[0-9]+; lanes avg_ctx=[0-9]+k requests=[0-9]+; codex reads=[0-9]+$' "$f")
   [ $? -le 1 ] || { fail report "$rel could not be read"; return; }
