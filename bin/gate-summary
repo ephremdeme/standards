@@ -1,0 +1,76 @@
+#!/bin/sh
+# Usage: standards/bin/gate-summary <log> [--id <mN>]          (the integrator; read-only, E4 retrospective A.1)
+# Summarises a bin/local-gate log in a few lines and judges it exactly as bin/merge-pr rule 3 judges --local-log, so
+# one call replaces reading the log. Nothing is written anywhere.
+# Prints, in file order, every line matching ^(check: |verify:|gate-head: |gate-tree: |gate-verdict: |gate-instrument: ),
+# then the first 10 lines starting "[FAIL]" and, when there are more, "gate-summary: … and <n> more [FAIL] lines";
+# nothing else from the log. Then exactly one verdict line (total output <= the filtered lines + 12):
+#   "gate-summary: green <id> <sha>", exit 0, iff every rule holds, judged in this order (merge-pr's patterns):
+#    1. >= 1 line exactly "check: OK";
+#    2. no line starting "check: FAILED";
+#    3. no line starting "[FAIL]";
+#    4. no line matching ^verify:.* [1-9][0-9]* failed$;
+#    5. >= 1 line starting "gate-head:", all identical, each "gate-head: <sha>" with <sha> 40 lowercase hex;
+#    6. >= 1 line starting "gate-tree:", every one exactly "gate-tree: clean";
+#    7. no line starting "gate-verdict: red";
+#    8. exactly one line starting "gate-verdict:", and it is "gate-verdict: green <id>" (<id> ^[a-z][a-z0-9_]*$);
+#    9. a line "verify:<id> — N ok, 0 failed" (N >= 1, the em dash U+2014) for that same <id>;
+#   10. with --id <mN>: <id> = <mN>.
+#   Otherwise "gate-summary: red — <the first failing rule>", exit 1.
+# Exit 2, "gate-summary: refused — <reason>" on stderr: usage; <log> not a readable, non-empty file, or a read of it
+# fails; --id not ^[a-z][a-z0-9_]*$. Every grep is captured first and its status judged (2 = a refusal, never a pass).
+set -u
+LC_ALL=C; export LC_ALL
+refuse() { echo "gate-summary: refused — $1" >&2; exit 2; }
+usage="usage: gate-summary <log> [--id <mN>]"
+want_id=
+case $# in
+  1) ;;
+  3) [ "$2" = --id ] || refuse "$usage"; want_id=$3
+     case "$want_id" in [a-z]*) ;; *) refuse "--id '$want_id' does not match ^[a-z][a-z0-9_]*\$";; esac
+     case "$want_id" in *[!a-z0-9_]*) refuse "--id '$want_id' does not match ^[a-z][a-z0-9_]*\$";; esac;;
+  *) refuse "$usage";;
+esac
+log=$1
+case "$log" in ''|-*) refuse "$usage";; esac
+[ -f "$log" ] && [ -r "$log" ] || refuse "log $log is not a readable file"
+[ -s "$log" ] || refuse "log $log is empty"
+# m <ERE>: the matching lines into $out (empty when none); a read error refuses.
+m() { out=$(grep -E -- "$1" "$log"); [ $? -le 1 ] || refuse "log $log could not be read"; }
+nl() { if [ -z "$1" ]; then echo 0; else printf '%s\n' "$1" | wc -l | tr -d ' '; fi; }
+
+m '^(check: |verify:|gate-head: |gate-tree: |gate-verdict: |gate-instrument: )'; [ -z "$out" ] || printf '%s\n' "$out"
+m '^\[FAIL\]'; fails=$out; nfails=$(nl "$fails")
+if [ "$nfails" -gt 0 ]; then
+  printf '%s\n' "$fails" | head -n 10
+  [ "$nfails" -le 10 ] || echo "gate-summary: … and $((nfails - 10)) more [FAIL] lines"
+fi
+
+red() { echo "gate-summary: red — $1"; exit 1; }
+m '^check: OK$'; [ -n "$out" ] || red "no check: OK line"
+m '^check: FAILED'; [ -z "$out" ] || red "$(nl "$out") check: FAILED line(s)"
+[ "$nfails" -eq 0 ] || red "$nfails [FAIL] line(s)"
+m '^verify:.* [1-9][0-9]* failed$'; [ -z "$out" ] || red "a verify line with failures: $(printf '%s\n' "$out" | head -n 1)"
+m '^gate-head:'; heads=$out
+[ -n "$heads" ] || red "no gate-head line"
+nh=$(printf '%s\n' "$heads" | sort -u | wc -l | tr -d ' ')
+[ "$nh" -eq 1 ] || red "$nh different gate-head values (the log matches no single head)"
+first=$(printf '%s\n' "$heads" | head -n 1); sha=${first#gate-head: }
+case "$sha" in *[!0-9a-f]*|'') sha=;; esac
+[ "$first" = "gate-head: $sha" ] && [ ${#sha} -eq 40 ] || red "gate-head is not 'gate-head: <40 lowercase hex>': $first"
+m '^gate-tree:'; trees=$out
+[ -n "$trees" ] || red "no gate-tree line"
+dirty=$(printf '%s\n' "$trees" | grep -vx -- 'gate-tree: clean' | head -n 1)
+[ -z "$dirty" ] || red "$dirty, not gate-tree: clean"
+m '^gate-verdict: red'; [ -z "$out" ] || red "a red gate verdict ($(printf '%s\n' "$out" | head -n 1))"
+m '^gate-verdict:'; verdicts=$out; nv=$(nl "$verdicts")
+[ "$nv" -eq 1 ] || red "$nv gate-verdict lines (exactly one gate-verdict: green <id> expected)"
+id=${verdicts#gate-verdict: green }
+case "$id" in [a-z]*) ;; *) id=;; esac
+case "$id" in *[!a-z0-9_]*) id=;; esac
+[ -n "$id" ] && [ "$verdicts" = "gate-verdict: green $id" ] || red "the verdict is not gate-verdict: green <id>: $verdicts"
+m "^verify:$id — [0-9]*[1-9][0-9]* ok, 0 failed\$"
+[ -n "$out" ] || red "no verify:$id — N ok, 0 failed line (N >= 1) for gate-verdict: green $id"
+[ -z "$want_id" ] || [ "$id" = "$want_id" ] || red "gate-verdict: green $id, not the requested $want_id"
+echo "gate-summary: green $id $sha"
+exit 0
