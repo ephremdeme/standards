@@ -18,9 +18,16 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_CO
 unset GH_HOST GH_REPO GH_TOKEN GITHUB_TOKEN
 STUB="$T/stub"; mkdir -p "$STUB/bin"; export STUB
 printf '#!/bin/sh\necho "gh $*" >> "$STUB/gh.log"\n[ -e "$STUB/gh-fail" ] && exit 1\ncat "$STUB/pr.json"\n' > "$STUB/bin/gh"
-chmod +x "$STUB/bin/gh"; PATH="$STUB/bin:$PATH"; export PATH
-check_ "the gh on PATH is the stub (no real gh is reached)" '[ "$(command -v gh)" = "$STUB/bin/gh" ]'
-check_ "jq is installed (close-check requires it)" 'command -v jq >/dev/null'
+chmod +x "$STUB/bin/gh"
+# PATH is the stub dir alone, holding links to exactly the tools the judge and close-check use: no real gh is reachable
+# even when it shares a directory with git or jq.
+for c in git jq sh bash cat grep sed tr cut wc head tail sort uniq mktemp rm dirname basename env mkdir chmod touch ln expr; do
+  p=$(command -v "$c") || { echo "close-check.t: $c not found"; exit 1; }
+  ln -s "$p" "$STUB/bin/$c" || { echo "close-check.t: cannot link $c"; exit 1; }
+done
+PATH="$STUB/bin"; export PATH
+[ "$(command -v gh)" = "$STUB/bin/gh" ] || { echo "close-check.t: the gh on PATH is not the stub — refusing to run"; exit 1; }
+ok "the gh on PATH is the stub and PATH holds no other directory"
 # prj <headRefOid> [labels...]: the stub's reply.
 prj(){ h=$1; shift; ls=; for l in "$@"; do ls="$ls${ls:+,}{\"name\":\"$l\"}"; done
   printf '{"state":"OPEN","isDraft":false,"headRefOid":"%s","isCrossRepository":false,"labels":[%s]}\n' "$h" "$ls" > "$STUB/pr.json"; }
@@ -64,6 +71,14 @@ want "control pr: gh exits 1 -> FAIL pr (fail closed)" 1 '^close-check: FAIL pr 
 rm -f "$STUB/gh-fail"
 printf '{"state":"OPEN","isDraft":false,"isCrossRepository":false,"labels":[]}\n' > "$STUB/pr.json"
 want "control pr: a reply without headRefOid -> FAIL pr (fail closed)" 1 '^close-check: FAIL pr — gh pr view reply lacks' sh "$CC" "$F" e9 7
+LJ='"labels":[{"name":"founder-approved"},{"name":"human-gate-accepted"}]'
+printf '{"state":"MERGED","isDraft":false,"headRefOid":"%s","isCrossRepository":false,%s}\n' "$HD" "$LJ" > "$STUB/pr.json"
+want "control pr: state MERGED -> FAIL pr" 1 '^close-check: FAIL pr — state MERGED, not OPEN$' sh "$CC" "$F" e9 7
+printf '{"state":"OPEN","isDraft":true,"headRefOid":"%s","isCrossRepository":false,%s}\n' "$HD" "$LJ" > "$STUB/pr.json"
+want "control pr: isDraft true -> FAIL pr" 1 '^close-check: FAIL pr — the PR is a draft$' sh "$CC" "$F" e9 7
+printf '{"state":"OPEN","isDraft":false,"headRefOid":"%s","isCrossRepository":true,%s}\n' "$HD" "$LJ" > "$STUB/pr.json"
+want "control pr: isCrossRepository true -> FAIL pr" 1 '^close-check: FAIL pr — the PR is from another repository$' sh "$CC" "$F" e9 7
+check_ "control pr (cross-repository): only the pr row fails" 'printf "%s\n" "$out" | tail -n 1 | grep -qx "close-check: FAILED (1 of 6 rows)"'
 # labels
 prj "$HD" founder-approved
 want "control labels: human-gate-accepted missing -> FAIL labels naming it" 1 '^close-check: FAIL labels — missing: human-gate-accepted$' sh "$CC" "$F" e9 7
@@ -78,6 +93,15 @@ check_ "control codex: only the codex row fails" 'printf "%s\n" "$out" | tail -n
 mk codex-two; printf 'codex-last-read: %s\n' "$C2" >> "$V/docs/md-reports/e9-milestone-review.md"; cm two
 prj "$(git -C "$V" rev-parse HEAD)" $LABELS
 want "control codex: two codex-last-read lines -> FAIL codex" 1 '^close-check: FAIL codex — 2 codex-last-read lines in docs/md-reports/e9-milestone-review.md, exactly one required$' sh "$CC" "$V" e9 7
+mk codex-side; git -C "$V" checkout -q -b side "$C2"; echo s > "$V/side.txt"; cm side; SD=$(git -C "$V" rev-parse HEAD)
+git -C "$V" checkout -q main; printf '# e9 review\ncodex-last-read: %s\n' "$SD" > "$V/docs/md-reports/e9-milestone-review.md"; cm review
+prj "$(git -C "$V" rev-parse HEAD)" $LABELS
+want "control codex: a codex-last-read that is not an ancestor of HEAD -> FAIL codex" 1 "^close-check: FAIL codex — codex-last-read $SD is not an ancestor of HEAD\$" sh "$CC" "$V" e9 7
+mk codex-untracked; git -C "$V" rm -q docs/md-reports/e9-milestone-review.md; cm unreview
+printf '# e9 review\ncodex-last-read: %s\n' "$C2" > "$V/docs/md-reports/e9-milestone-review.md"
+prj "$(git -C "$V" rev-parse HEAD)" $LABELS
+want "control codex: an untracked review file (merge-pr reads it at the sha) -> FAIL codex" 1 '^close-check: FAIL codex — docs/md-reports/e9-milestone-review.md is not committed at HEAD$' sh "$CC" "$V" e9 7
+check_ "control codex (untracked): only the codex row fails" 'printf "%s\n" "$out" | tail -n 1 | grep -qx "close-check: FAILED (1 of 6 rows)"'
 # mutants
 mk surv; printf '# e9 mutants\nrun: %s files: ledger/src/x.rs tested: 5 missed: 0 caught: 4 unviable: 1 timeout: 0\nopen survivors: 1\n' "$C1" > "$V/docs/md-reports/e9-mutants.md"; cm surv; rv
 want "control mutants: open survivors: 1 last -> FAIL mutants" 1 "^close-check: FAIL mutants — last line is 'open survivors: 1', not 'open survivors: 0'\$" sh "$CC" "$V" e9 7
@@ -91,6 +115,14 @@ mk malformed; printf '# e9 mutants\nrun: %s files: ledger/src/x.rs tested: 5 mis
 want "control mutants: a malformed run: line is a FAIL, never skipped" 1 '^close-check: FAIL mutants — malformed run line: run: ' sh "$CC" "$V" e9 7
 mk nocrate; printf '# e9 mutants\nrun: %s files: ledger/src/x.rs,Cargo.toml tested: 5 missed: 0 caught: 4 unviable: 1 timeout: 0\nopen survivors: 0\n' "$C1" > "$V/docs/md-reports/e9-mutants.md"; cm nocrate; rv
 want "control mutants: a files: entry without a <crate>/ prefix is a FAIL, never a vacuous diff" 1 "^close-check: FAIL mutants — run [0-9a-f]{40}: files: entry 'Cargo.toml' has no <crate>/ prefix\$" sh "$CC" "$V" e9 7
+mk nosrc; printf '# e9 mutants\nrun: %s files: docs/x.md tested: 5 missed: 0 caught: 4 unviable: 1 timeout: 0\nopen survivors: 0\n' "$C1" > "$V/docs/md-reports/e9-mutants.md"; cm nosrc; rv
+want "control mutants: a crate with no src tree at the run (a vacuous diff) -> FAIL mutants" 1 '^close-check: FAIL mutants — run [0-9a-f]{40}: docs/src does not exist at the run$' sh "$CC" "$V" e9 7
+mk norun; printf '# e9 mutants\nno runs recorded\nopen survivors: 0\n' > "$V/docs/md-reports/e9-mutants.md"; cm norun; rv
+want "control mutants: a ledger with no run: line -> FAIL mutants" 1 '^close-check: FAIL mutants — no run: line in docs/md-reports/e9-mutants.md$' sh "$CC" "$V" e9 7
+mk nocommit; printf '# e9 mutants\nrun: deadbeefdeadbeef files: ledger/src/x.rs tested: 5 missed: 0 caught: 4 unviable: 1 timeout: 0\nopen survivors: 0\n' > "$V/docs/md-reports/e9-mutants.md"; cm nocommit; rv
+want "control mutants: a run: sha that is not a commit -> FAIL mutants" 1 '^close-check: FAIL mutants — run deadbeefdeadbeef is not a commit here$' sh "$CC" "$V" e9 7
+mk nochain; printf '# e9 close\n%s\n' "$TOK" > "$V/docs/md-reports/e9.md"; cm nochain; rv
+want "control report: no full chain: line -> FAIL report" 1 "^close-check: FAIL report — docs/md-reports/e9.md: no 'full chain: ' line\$" sh "$CC" "$V" e9 7
 # report
 mk report; printf '# e9 close\nfull chain: green at the merge head\n' > "$V/docs/md-reports/e9.md"; cm report; rv
 want "control report: no Tokens line -> FAIL report" 1 '^close-check: FAIL report — docs/md-reports/e9.md: no Tokens: line' sh "$CC" "$V" e9 7

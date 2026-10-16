@@ -11,11 +11,12 @@ set -u
 S=$(cd "$(dirname "$0")/.." && pwd); LV="$S/bin/lane-verify"; T=$(mktemp -d); R=0; NB=0
 T=$(cd "$T" && pwd -P); TMPDIR=$T; export TMPDIR
 ok(){ echo "PASS    $1"; }; bad(){ echo "FAIL    $1"; R=1; }
-want(){ # want <label> <rc> <regex> <regex2> <cmd...>: both regexes must match a line of the output
+want(){ # want <label> <rc> <own> <regex2> <cmd...>: both regexes must match a line of the output; <own> is the case's
+  # own line (the step it is about), still required when task-lint's disk rule makes the case BLOCKED.
   label=$1; rc_want=$2; re=$3; re2=$4; shift 4; out=$("$@" 2>&1); rc=$?
   if [ "$rc" -eq "$rc_want" ] && printf '%s' "$out" | grep -Eq -- "$re" && printf '%s' "$out" | grep -Eq -- "$re2"; then ok "$label"
-  elif printf '%s\n' "$out" | grep -q '^task-lint: FAIL disk'; then
-    NB=$((NB + 1)); echo "BLOCKED $label (task-lint's disk rule: under 15 GB free for the fixture, not lane-verify's reason)"
+  elif printf '%s\n' "$out" | grep -q '^task-lint: FAIL disk' && printf '%s' "$out" | grep -Eq -- "$re"; then
+    NB=$((NB + 1)); echo "BLOCKED $label (task-lint's disk rule: under 15 GB free for the fixture, not lane-verify's reason; its own line /$re/ is there)"
   else bad "$label (rc=$rc want $rc_want, /$re/ and /$re2/)"; printf '%s\n' "$out" | tail -n 10 | sed 's/^/        /'; fi; }
 check_(){ if eval "$2"; then ok "$1"; else bad "$1"; fi; }
 export GIT_CONFIG_GLOBAL=/dev/null GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
@@ -24,6 +25,7 @@ P="$T/primary"; git init -q -b main "$P"; mkdir -p "$P/scripts/verify"
 printf '%s\n' '#!/bin/bash' \
   '[ "$#" -eq 2 ] && [ "$1" = --section ] && [ "$2" = x ] || { echo "e9-stub: wanted --section x, got: $*"; exit 3; }' \
   'echo "e9-stub noise: cwd=$(pwd -P)"' \
+  'if [ -e "$CTL/e9-silent" ]; then echo "[ok]   a"; echo "verify:e8 — 2 ok, 0 failed"; exit 0; fi' \
   'if [ -e "$CTL/e9-red" ]; then echo "[ok]   a"; echo "[FAIL] b (rc=1)"; echo "verify:e9 — 1 ok, 1 failed"; exit 1; fi' \
   'echo "[ok]   a"; echo "[ok]   b"; echo "verify:e9 — 2 ok, 0 failed"' > "$P/scripts/verify/e9.sh"
 echo a > "$P/a.txt"; git -C "$P" add -A; git -C "$P" commit -qm base; B=$(git -C "$P" rev-parse HEAD)
@@ -34,10 +36,14 @@ git -C "$W" add -A; git -C "$W" commit -qm lane
 task(){ printf 'Branch: opus/fix\nBase: %s\nRisk: HIGH\n\n## 1. Read first\n- a.txt\n## 2. What this is\nComplexity: low\nTags: %s\n## 3. Files you own\n```owned\na.txt\ntool.sh\n```\n## 4. Hard rules\n- none\n## 5. Verify\n- sh tool.sh\n## 6. Commit subject\nfix: a\n## 7. Binding facts\n- none\n' "$B" "$1" > "$W/TASK.md"; }
 task none
 
-want "all OK with --section e9 x -> exit 0, OK (5 steps), together with risk HIGH" 0 '^lane-verify: OK \(5 steps\)$' '^lane-verify: risk HIGH$' sh "$LV" "$W" "$B" --section e9 x
-check_ "the steps come in order (tree branch task-lint check-scope risk section) and the instrument's verify line is shown, not its noise" \
-  '[ "$(printf "%s\n" "$out" | grep "^lane-verify: " | cut -d" " -f2 | tr "\n" " ")" = "tree branch task-lint check-scope risk section OK " ] && printf "%s\n" "$out" | grep -qx "verify:e9 — 2 ok, 0 failed" && ! printf "%s\n" "$out" | grep -q "noise\|\[ok\]"'
-want "all OK without --section -> OK (4 steps)" 0 '^lane-verify: OK \(4 steps\)$' '^lane-verify: risk (LOW|HIGH)$' sh "$LV" "$W" "$B"
+want "all OK with --section e9 x -> exit 0, OK (5 steps), together with risk HIGH" 0 '^lane-verify: risk HIGH$' '^lane-verify: OK \(5 steps\)$' sh "$LV" "$W" "$B" --section e9 x
+# Disk-aware: with task-lint's disk rule failing, every other step must still be OK and the verdict FAILED (1 of 5).
+if printf '%s\n' "$out" | grep -q '^task-lint: FAIL disk'; then
+  ord="tree OK|branch OK|task-lint FAIL|check-scope OK|risk HIGH|section OK|FAILED (1|"; echo "BLOCKED the step order runs with task-lint's disk rule failing (the other steps are still asserted)"
+else ord="tree OK|branch OK|task-lint OK|check-scope OK|risk HIGH|section OK|OK (5|"; fi
+check_ "the steps come in order (tree branch task-lint check-scope risk section), each OK, and the instrument's verify line is shown, not its noise" \
+  '[ "$(printf "%s\n" "$out" | grep "^lane-verify: " | cut -d" " -f2-3 | tr "\n" "|")" = "$ord" ] && printf "%s\n" "$out" | grep -qx "verify:e9 — 2 ok, 0 failed" && ! printf "%s\n" "$out" | grep -q "noise\|\[ok\]"'
+want "all OK without --section -> OK (4 steps)" 0 '^lane-verify: check-scope OK$' '^lane-verify: OK \(4 steps\)$' sh "$LV" "$W" "$B"
 check_ "lane-verify wrote nothing in the worktree" '[ "$(git -C "$W" status --porcelain --untracked-files=all)" = "?? TASK.md" ]'
 # tree
 echo s > "$W/stray"
@@ -61,6 +67,9 @@ touch "$CTL/e9-red"
 want "control section: the instrument prints 1 ok, 1 failed and exits 1 -> FAIL section" 1 '^lane-verify: section FAIL — scripts/verify/e9.sh --section x exited 1$' '^\[FAIL\] b \(rc=1\)$' sh "$LV" "$W" "$B" --section e9 x
 check_ "control section: only the section fails (1 of 5)" 'printf "%s\n" "$out" | tail -n 1 | grep -qx "lane-verify: FAILED (1 of 5 steps)" || printf "%s\n" "$out" | grep -q "^task-lint: FAIL disk"'
 rm -f "$CTL/e9-red"
+touch "$CTL/e9-silent"
+want "control section: the instrument exits 0 without a passing verify:e9 line -> FAIL section" 1 '^lane-verify: section FAIL — no verify:e9 — N ok, 0 failed line \(N >= 1\)$' '^lane-verify: FAILED' sh "$LV" "$W" "$B" --section e9 x
+rm -f "$CTL/e9-silent"
 # refusals
 want "refusal: a --section name with a space -> exit 2" 2 "^lane-verify: refused — <section-name> 'a b' does not match" . sh "$LV" "$W" "$B" --section e9 'a b'
 want "refusal: an instrument id E9 -> exit 2" 2 "^lane-verify: refused — <instrument-id> 'E9' does not match" . sh "$LV" "$W" "$B" --section E9 x

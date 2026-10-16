@@ -14,15 +14,18 @@
 #            cross-repository, headRefOid = HEAD. Any gh or jq failure, or a missing or mistyped field, is a FAIL.
 #   labels   gh pr view <pr> --repo <r> --json labels: founder-approved and human-gate-accepted both present (presence
 #            only; the timing rule is merge-pr's); the detail names the missing one(s). gh/jq failure = FAIL.
+#   The three reports below are read as committed at HEAD (`git show HEAD:<file>`, as merge-pr reads them at the sha
+#   through the contents API), never from the working tree: a file not committed at HEAD is a FAIL naming it.
 #   codex    docs/md-reports/<mN>-milestone-review.md holds exactly one line starting "codex-last-read:", which is
 #            "codex-last-read: <X>" (40 lowercase hex); PASS when X = HEAD, or X is a commit, an ancestor of HEAD, and
 #            `git diff --name-only X HEAD` lists nothing but that review file.
 #   mutants  docs/md-reports/<mN>-mutants.md exists; its last non-empty line is exactly "open survivors: 0"; every line
 #            starting "run:" matches ^run: [0-9a-f]{7,40} files: .+ tested: N missed: N caught: N unviable: N timeout: N$
-#            (a malformed run: line is a FAIL, never skipped); for each, tested = missed + caught + unviable + timeout,
-#            the sha is a commit here, and for each <crate> (the first path segment of each comma- or space-separated
-#            files: entry; an entry without a "/" is a FAIL) `git diff --quiet <sha> HEAD -- <crate>/src` exits 0
-#            (1 = changed since the run; any other status = FAIL).
+#            (a malformed run: line is a FAIL, never skipped; at least one run: line is required); for each, tested =
+#            missed + caught + unviable + timeout, the sha is a commit here, and for each <crate> (the first path segment
+#            of each comma- or space-separated files: entry; an entry without a "/" is a FAIL) <crate>/src exists at the
+#            sha (`git cat-file -e`; a pathspec in neither tree would diff clean) and `git diff --quiet <sha> HEAD --
+#            <crate>/src` exits 0 (1 = changed since the run; any other status = FAIL).
 #   report   docs/md-reports/<mN>.md has a line starting "full chain: " and one matching ^Tokens: integrator
 #            avg_ctx=[0-9]+k calls_per_merge=[0-9]+; lanes avg_ctx=[0-9]+k requests=[0-9]+; codex reads=[0-9]+$.
 #   gate     only with --log: `bin/gate-summary <path> --id <mN>` (this script's sibling) exits 0 and its <sha> = HEAD;
@@ -33,6 +36,7 @@
 set -u
 set -f  # word splitting below never expands globs
 LC_ALL=C; export LC_ALL
+GIT_OPTIONAL_LOCKS=0; export GIT_OPTIONAL_LOCKS   # git status never takes index.lock in the integrator's checkout
 GIT_NO_REPLACE_OBJECTS=1; export GIT_NO_REPLACE_OBJECTS
 unset GH_HOST GH_REPO
 here=$(cd "$(dirname "$0")" && pwd -P) || { echo "close-check: cannot locate its own directory" >&2; exit 2; }
@@ -80,6 +84,8 @@ fi
 if [ $log_set -eq 1 ]; then [ -f "$log" ] && [ -r "$log" ] || refuse "--log $log is not a readable file"; fi
 tmp=$(mktemp) || refuse "mktemp failed"
 trap 'rm -f "$tmp"' EXIT
+doc=$(mktemp) || refuse "mktemp failed"
+trap 'rm -f "$tmp" "$doc"' EXIT
 
 rows=0; nfail=0
 pass() { rows=$((rows + 1)); echo "close-check: PASS $1${2:+ $2}"; }
@@ -87,6 +93,9 @@ fail() { rows=$((rows + 1)); nfail=$((nfail + 1))
   d=$(printf '%s' "$2" | tr '\n\r' '  ' | cut -c1-200); echo "close-check: FAIL $1 — $d"; }
 g() { git -C "$abs" "$@"; }
 dec() { n=${1#"${1%%[!0]*}"}; echo "${n:-0}"; }   # strip leading zeros of a validated digit run
+# committed <rel>: the file as committed at HEAD into $doc (merge-pr reads it at the sha, never the working tree);
+# status 1 when it is not committed there or cannot be read.
+committed() { g cat-file -e "$head:$1" 2>/dev/null && g show "$head:$1" > "$doc" 2>/dev/null; }
 
 # head
 if st=$(g status --porcelain --untracked-files=no --ignore-submodules=none 2>/dev/null); then
@@ -129,8 +138,8 @@ row_labels
 
 # codex
 row_codex() {
-  rel="docs/md-reports/$m-milestone-review.md"; f="$abs/$rel"
-  [ -f "$f" ] && [ -r "$f" ] || { fail codex "$rel is missing or unreadable"; return; }
+  rel="docs/md-reports/$m-milestone-review.md"; f=$doc
+  committed "$rel" || { fail codex "$rel is not committed at HEAD"; return; }
   ln=$(grep -- '^codex-last-read:' "$f"); [ $? -le 1 ] || { fail codex "$rel could not be read"; return; }
   [ -n "$ln" ] || { fail codex "no codex-last-read line in $rel"; return; }
   c=$(printf '%s\n' "$ln" | wc -l | tr -d ' ')
@@ -150,12 +159,13 @@ row_codex
 
 # mutants
 row_mutants() {
-  rel="docs/md-reports/$m-mutants.md"; f="$abs/$rel"
-  [ -f "$f" ] && [ -r "$f" ] || { fail mutants "$rel is missing or unreadable"; return; }
+  rel="docs/md-reports/$m-mutants.md"; f=$doc
+  committed "$rel" || { fail mutants "$rel is not committed at HEAD"; return; }
   last=$(grep -v -- '^$' "$f"); [ $? -le 1 ] || { fail mutants "$rel could not be read"; return; }
   last=$(printf '%s\n' "$last" | tail -n 1)
   [ "$last" = "open survivors: 0" ] || { fail mutants "last line is '$last', not 'open survivors: 0'"; return; }
   grep -- '^run:' "$f" > "$tmp"; [ $? -le 1 ] || { fail mutants "$rel could not be read"; return; }
+  [ -s "$tmp" ] || { fail mutants "no run: line in $rel"; return; }   # at least one; every one well-formed (below)
   re='^run: [0-9a-f]{7,40} files: .+ tested: [0-9]+ missed: [0-9]+ caught: [0-9]+ unviable: [0-9]+ timeout: [0-9]+$'
   while IFS= read -r line; do
     printf '%s\n' "$line" | grep -Eq -- "$re" || { fail mutants "malformed run line: $line"; return; }
@@ -173,9 +183,11 @@ row_mutants() {
       case "$p" in */*) ;; *) fail mutants "run $sha: files: entry '$p' has no <crate>/ prefix"; return;; esac
       crate=${p%%/*}
       case "$crate" in ''|.|..|*[!A-Za-z0-9_.-]*) fail mutants "run $sha: bad files: entry '$p'"; return;; esac
+      # A pathspec in neither tree diffs clean (exit 0): the crate's src must exist at the run, or the check is vacuous.
+      g cat-file -e "$full:$crate/src" 2>/dev/null || { fail mutants "run $sha: $crate/src does not exist at the run"; return; }
       g diff --quiet "$full" "$head" -- "$crate/src" 2>/dev/null; rc=$?
-      [ $rc -eq 0 ] || { [ $rc -eq 1 ] && fail mutants "run $sha: $crate/src changed since the run" \
-        || fail mutants "run $sha: git diff failed ($rc)"; return; }
+      if [ $rc -eq 1 ]; then fail mutants "run $sha: $crate/src changed since the run"; return
+      elif [ $rc -ne 0 ]; then fail mutants "run $sha: git diff failed ($rc)"; return; fi
     done
   done < "$tmp"
   pass mutants
@@ -184,8 +196,8 @@ row_mutants
 
 # report
 row_report() {
-  rel="docs/md-reports/$m.md"; f="$abs/$rel"
-  [ -f "$f" ] && [ -r "$f" ] || { fail report "$rel is missing or unreadable"; return; }
+  rel="docs/md-reports/$m.md"; f=$doc
+  committed "$rel" || { fail report "$rel is not committed at HEAD"; return; }
   fc=$(grep -c -- '^full chain: ' "$f"); [ $? -le 1 ] || { fail report "$rel could not be read"; return; }
   tk=$(grep -c -E -- '^Tokens: integrator avg_ctx=[0-9]+k calls_per_merge=[0-9]+; lanes avg_ctx=[0-9]+k requests=[0-9]+; codex reads=[0-9]+$' "$f")
   [ $? -le 1 ] || { fail report "$rel could not be read"; return; }

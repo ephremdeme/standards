@@ -19,6 +19,7 @@
 # Then "lane-verify: OK (<n> steps)" exit 0, or "lane-verify: FAILED (<k> of <n> steps)" exit 1.
 set -u
 LC_ALL=C; export LC_ALL
+GIT_OPTIONAL_LOCKS=0; export GIT_OPTIONAL_LOCKS   # git status never takes index.lock in the lane's worktree
 here=$(cd "$(dirname "$0")" && pwd -P) || { echo "lane-verify: cannot locate its own directory" >&2; exit 2; }
 refuse() { echo "lane-verify: refused — $1" >&2; exit 2; }
 usage="usage: lane-verify <worktree> <base> [--section <instrument-id> <section-name>]"
