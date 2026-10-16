@@ -10,11 +10,16 @@
 # cargo can be reached. The stub cargo logs its arguments and environment, answers --list and writes outcome files;
 # the stub systemd-run logs its arguments and runs the command
 # after `--` (the cap probe, which reads memory.max of its cgroup, gets $STUB/memory.max, by default 3G in bytes), or
-# fails to create the scope. Run: sh standards/tests/local-mutants.t.sh -> exit 0 when all cases behave.
+# fails to create the scope. --resume (exchange D-154): an earlier run's outcome directory resumed with --iterate, its
+# caught and unviable counted as the union with the new run's; refused when the diff, the listing or HEAD moved.
+# MUTANTS_PG_DURABILITY=off (D-156): the stub psql logs its argv into cargo.log (so the order shows) and the libpq
+# variables it was given into psql.env, and exits per $STUB/psql.rc (off) and $STUB/psql.rc.on (the restore).
+# Run: sh standards/tests/local-mutants.t.sh -> exit 0 when all cases behave.
 set -u
 S=$(cd "$(dirname "$0")/.." && pwd); LM="$S/bin/local-mutants"; T=$(mktemp -d); R=0
 TMPDIR=$T; export TMPDIR
-unset BUILD_LOCK_TOKEN BUILD_LOCK_WAIT CARGO_TARGET_DIR RUSTC_WRAPPER MUTANTS_MEMORY_MAX MUTANTS_NO_SCCACHE
+unset BUILD_LOCK_TOKEN BUILD_LOCK_WAIT BUILD_LOCK_STALE CARGO_TARGET_DIR RUSTC_WRAPPER MUTANTS_MEMORY_MAX MUTANTS_NO_SCCACHE \
+  MUTANTS_PG_DURABILITY DATABASE_URL PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE
 ok(){ echo "PASS    $1"; }; bad(){ echo "FAIL    $1"; R=1; }
 want(){ # want <label> <rc> <regex> <cmd...>
   label=$1; rc_want=$2; re=$3; shift 3; out=$("$@" 2>&1); rc=$?
@@ -40,9 +45,10 @@ case "$1" in
         while [ "$i" -lt "$n" ]; do i=$((i + 1)); echo "ledger/src/lib.rs:$i:5: replace f$i -> bool with true"; done; exit 0;;
     esac
     [ -e "$STUB/no-outcomes" ] && exit 0
+    [ -e "$STUB/term-parent" ] && kill -TERM "$PPID"
     mkdir -p "$o/mutants.out"
-    for k in caught missed timeout unviable; do
-      : > "$o/mutants.out/$k.txt"; i=0; n=$(cat "$STUB/$k" 2>/dev/null || echo 0)
+    for k in caught missed timeout unviable; do   # <kind>.from: the numbering starts after it (a resumed run's new mutants)
+      : > "$o/mutants.out/$k.txt"; i=$(cat "$STUB/$k.from" 2>/dev/null || echo 0); n=$((i + $(cat "$STUB/$k" 2>/dev/null || echo 0)))
       while [ "$i" -lt "$n" ]; do i=$((i + 1)); echo "ledger/src/lib.rs:$i:5: replace f$i ($k)" >> "$o/mutants.out/$k.txt"; done
     done
     exit "$(cat "$STUB/mutants.rc" 2>/dev/null || echo 0)";;
@@ -59,12 +65,20 @@ shift
 case "$*" in *memory.max*) if [ -e "$STUB/memory.max" ]; then cat "$STUB/memory.max"; else echo 3221225472; fi; exit 0;; esac
 STUB_SCOPE=capped; export STUB_SCOPE; exec "$@"
 SD
+cat > "$T/bin/psql" << 'PQ'
+#!/bin/sh
+echo "psql $*" >> "$STUB/cargo.log"
+echo "host=${PGHOST-} port=${PGPORT-} user=${PGUSER-} db=${PGDATABASE-} url=${DATABASE_URL:+set}" >> "$STUB/psql.env"
+printf '%s\n' "${PGPASSWORD-}" > "$STUB/psql.pw"
+case "$*" in *"= on"*) exit "$(cat "$STUB/psql.rc.on" 2>/dev/null || echo 0)";; esac
+exit "$(cat "$STUB/psql.rc" 2>/dev/null || echo 0)"
+PQ
 printf '#!/bin/sh\necho "sccache stub must not be called" >&2; exit 99\n' > "$H/.cargo/bin/sccache"
-chmod +x "$H/.cargo/bin/cargo" "$H/.cargo/bin/sccache" "$T/bin/systemd-run"; cp "$H/.cargo/bin/cargo" "$H2/.cargo/bin/cargo"
+chmod +x "$H/.cargo/bin/cargo" "$H/.cargo/bin/sccache" "$T/bin/systemd-run" "$T/bin/psql"; cp "$H/.cargo/bin/cargo" "$H2/.cargo/bin/cargo"
 # The fixture: a workspace (ledger, other) with a .cargo/mutants.toml that --no-config must keep out; the change edits
 # ledger/src/lib.rs, a comment in model.rs, adds new.rs and notes.md, deletes gone.rs, and edits other/src/x.rs and
 # ledger/Cargo.toml.
-P="$T/p"; git init -q -b main "$P"; printf '/target/\n.worktrees/\n' > "$P/.gitignore"
+P="$T/p"; git init -q -b main "$P"; printf '/target/\n.worktrees/\n.env\n' > "$P/.gitignore"
 printf '[workspace]\nmembers = ["ledger", "other"]\n' > "$P/Cargo.toml"
 mkdir -p "$P/.cargo"; printf 'additional_cargo_args = ["--all-features"]\nexclude_re = ["model"]\n' > "$P/.cargo/mutants.toml"
 mkdir -p "$P/ledger/src" "$P/other/src"; printf '[package]\nname = "ledger"\n' > "$P/ledger/Cargo.toml"
@@ -82,7 +96,7 @@ git clone -q --no-local "$P" "$T/dirty"; git -C "$T/dirty" remote remove origin;
 O="$T/odd"; git clone -q --no-local "$P" "$O"; git -C "$O" remote remove origin
 echo 'pub fn s() {}' > "$O/ledger/src/a b.rs"; git -C "$O" add -A; git -C "$O" commit -qm odd
 # From here PATH is the stub systemd-run plus links to the system tools the script and this test use; nothing else.
-for t in sh dirname git grep sed cat cut head tail sort paste tr wc mktemp rm rmdir mkdir mv cp od date env jq sleep ls touch; do
+for t in sh dirname git grep sed cat cut head tail sort paste tr wc mktemp rm rmdir mkdir mv cp od date env jq sleep ls touch awk cmp; do
   p=$(command -v "$t") && case "$p" in /*) ln -s "$p" "$T/sys/$t";; esac; done
 printf '#!/bin/sh\nexit 0\n' > "$T/sys/true"; chmod +x "$T/sys/true"   # the scope probe's command; a builtin has no path
 PATH="$T/bin:$T/sys"; export PATH
@@ -107,7 +121,11 @@ want "control: a lane worktree -> exit 2" 2 "^local-mutants: refused — $P/\.wo
 want "control: the primary checkout (it has a lane worktree) -> exit 2" 2 "^local-mutants: refused — $P is not a disposable clone" sh "$LM" "$P" "$BASE" ledger
 want "control: a clone with a remote -> exit 2" 2 "^local-mutants: refused — $T/withremote is not a disposable clone" sh "$LM" "$T/withremote" "$BASE" ledger
 want "control: a dirty clone -> exit 2" 2 "^local-mutants: refused — $T/dirty is not a disposable clone" sh "$LM" "$T/dirty" "$BASE" ledger
-want "control: two arguments -> usage, exit 2" 2 '^local-mutants: usage: local-mutants <clone> <base> <crate> \[--tests <name>\[,<name>\.\.\.\]\]$' sh "$LM" "$C" "$BASE"
+want "control: two arguments -> usage, exit 2" 2 '^local-mutants: usage: local-mutants <clone> <base> <crate> \[--tests <name>\[,<name>\.\.\.\]\] \[--resume <out-dir>\]$' sh "$LM" "$C" "$BASE"
+want "control: --resume twice -> usage, exit 2" 2 '^local-mutants: usage: ' sh "$LM" "$C" "$BASE" ledger --resume "$T" --resume "$T"
+want "control: --tests twice -> usage, exit 2" 2 '^local-mutants: usage: ' sh "$LM" "$C" "$BASE" ledger --tests a --tests b
+want "control: --resume without a directory -> usage, exit 2" 2 '^local-mutants: usage: ' sh "$LM" "$C" "$BASE" ledger --tests a --resume
+want "control: MUTANTS_PG_DURABILITY=maybe -> exit 2" 2 "^local-mutants: refused — MUTANTS_PG_DURABILITY must be off or unset, got 'maybe'\$" env MUTANTS_PG_DURABILITY=maybe sh "$LM" "$C" "$BASE" ledger
 want "control: --tests without a list -> usage, exit 2" 2 '^local-mutants: usage: ' sh "$LM" "$C" "$BASE" ledger --tests
 want "control: a fourth argument other than --tests -> usage, exit 2" 2 '^local-mutants: usage: ' sh "$LM" "$C" "$BASE" ledger --test e3_model
 want "control: a crate with a path in it -> usage, exit 2" 2 '^local-mutants: usage: ' sh "$LM" "$C" "$BASE" ../ledger
@@ -148,7 +166,7 @@ reset_stub
 want "control: no <crate>/src .rs file changed in the diff -> exit 2" 2 "^local-mutants: refused — no api/src/\*\*/\*\.rs file changed in $BASE\.\.HEAD; nothing to mutate\$" sh "$LM" "$C" "$BASE" api
 reset_stub
 want "control: a changed file name the run: line cannot carry -> exit 2" 2 "^local-mutants: refused — the changed file 'ledger/src/a b\.rs' has a name the run: line cannot carry \(only A-Z a-z 0-9 _ \. / -\)\$" sh "$LM" "$O" "$BASE" ledger
-reset_stub; mkdir "$T/build.lock.d"; printf 'token=x\npid=999999999\nwho=other-session\nsince=2026-10-13T10:00:00Z\ncwd=/x\n' > "$T/build.lock.d/owner"
+reset_stub; mkdir "$T/build.lock.d"; printf 'token=x\npid=999999999\nwho=other-session\nsince=%s\ncwd=/x\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$T/build.lock.d/owner"   # younger than BUILD_LOCK_STALE: held
 want "control: a foreign build lock with BUILD_LOCK_WAIT=0 -> exit 3" 3 '^local-mutants: refused — the machine build lock is held by other-session' env BUILD_LOCK_WAIT=0 sh "$LM" "$C" "$BASE" ledger
 check_ "control: ... no cargo mutants call under the foreign lock" 'nocall'
 rm -f "$T/build.lock.d/owner"; rmdir "$T/build.lock.d"
@@ -197,4 +215,81 @@ printed "MUTANTS_MEMORY_MAX=3145728K, memory.max 3221225472 (K x 1024) -> exit 0
 reset_stub; echo 0 > "$STUB/list"; lm sh "$LM" "$C" "$BASE" ledger
 printed "no mutant on the changed lines -> exit 0, tested 0, no mutation run" 0 "$(runline 0 0 0 0 0)"
 check_ "... only the --list call ran" '[ "$(grep -c "cargo mutants " "$STUB/cargo.log")" -eq 1 ] && grep -q "cargo mutants --list " "$STUB/cargo.log"'
+check_ "... MUTANTS_PG_DURABILITY unset: no psql call at all" '[ ! -e "$STUB/psql.env" ] && ! grep -q "^psql " "$STUB/cargo.log"'
+# --resume (exchange D-154): a run that stopped after 3 of 5 mutants, then resumed in its own outcome directory. The stub
+# writes only the new run's outcomes (the non-cumulative case), so the earlier caught must be counted as a union.
+reset_stub; echo 5 > "$STUB/list"; echo 3 > "$STUB/caught"; lm sh "$LM" "$C" "$BASE" ledger
+failed "resume: a first run that stops after 3 of 5 mutants -> exit 1, incomplete" 1 '^local-mutants: incomplete run — tested 3 \(missed 0, caught 3, unviable 0, timeout 0\) of 5 listed mutants$'
+RD=$(sed -n 's/^local-mutants: compiler cache: .*; outcomes in //p' "$T/err")
+check_ "... its outcome directory holds changes.diff, list.txt, mutants.out/ and resume.txt (clone, base, head)" '[ -n "$RD" ] && [ -f "$RD/changes.diff" ] && [ -f "$RD/list.txt" ] && [ -d "$RD/mutants.out" ] && [ "$(cat "$RD/resume.txt")" = "$(printf "clone=%s\nbase=%s\nhead=%s" "$C" "$BASE" "$CH")" ]'
+cp -R "$RD" "$T/dup"; cp -R "$RD" "$T/nolist"; rm "$T/nolist/list.txt"; cp -R "$RD" "$T/tamper"; echo x >> "$T/tamper/changes.diff"
+reset_stub; echo 5 > "$STUB/list"; echo 2 > "$STUB/caught"; echo 3 > "$STUB/caught.from"; lm sh "$LM" "$C" "$BASE" ledger --resume "$RD"
+printed "resume: --resume <dir>: the new run's 2 caught united with the earlier 3 -> exit 0, tested 5 = listed" 0 "$(runline 5 0 5 0 0)"
+check_ "... the run carries -o <that dir> and --iterate; the --list call carries neither" '[ "$(grep -c "cargo mutants " "$STUB/cargo.log")" -eq 2 ] && grep -Fq -- "--timeout-multiplier 2 -o $RD --iterate -- -E not test(=random_sessions_match_model)" "$STUB/cargo.log" && ! grep "cargo mutants --list" "$STUB/cargo.log" | grep -q -e --iterate -e " -o "'
+check_ "... the --list call read the stored changes.diff" 'grep -Fq "cargo mutants --list --no-config --in-diff $RD/changes.diff -p ledger" "$STUB/cargo.log"'
+reset_stub; echo 5 > "$STUB/list"; echo 2 > "$STUB/caught"; lm sh "$LM" "$C" "$BASE" ledger --resume "$RD" --tests e3_model
+printed "resume: a second resume (options in the other order), every mutant caught before -> the union still counts 5 -> exit 0" 0 "$(runline 5 0 5 0 0)"
+check_ "... --test e3_model follows -- with --iterate before it" 'grep -Fq -- "-o $RD --iterate -- -E not test(=random_sessions_match_model) --test e3_model" "$STUB/cargo.log"'
+echo 'ledger/src/lib.rs:1:5: replace f1 (missed)' >> "$T/dup/mutants.out/caught.txt"
+reset_stub; echo 5 > "$STUB/list"; echo 1 > "$STUB/missed"; echo 2 > "$STUB/mutants.rc"; lm sh "$LM" "$C" "$BASE" ledger --resume "$T/dup"
+failed "control: resume: a mutant caught before and missed now -> exit 1, never counted twice" 1 "^local-mutants: a mutant is named under two outcomes after --resume \\(caught or unviable before, another outcome now\\); see $T/dup/union\$"
+reset_stub; echo 5 > "$STUB/list"; lm sh "$LM" "$C" "$BASE" ledger --resume "$T/nolist"
+failed "control: resume: a directory without list.txt -> exit 2" 2 "^local-mutants: refused — --resume $T/nolist is not an outcome directory of local-mutants\$"
+mkdir "$T/empty"; lm sh "$LM" "$C" "$BASE" ledger --resume "$T/empty"
+failed "control: resume: an empty directory -> exit 2" 2 "^local-mutants: refused — --resume $T/empty is not an outcome directory of local-mutants\$"
+lm sh "$LM" "$C" "$BASE" ledger --resume "$T/nosuchdir"
+failed "control: resume: no such directory -> exit 2" 2 "^local-mutants: refused — --resume $T/nosuchdir is not an outcome directory of local-mutants\$"
+check_ "control: ... no cargo mutants call for any of them" 'nocall'
+reset_stub; git clone -q --no-local "$P" "$T/other"; git -C "$T/other" remote remove origin; lm sh "$LM" "$T/other" "$BASE" ledger --resume "$RD"
+failed "control: resume: the outcome directory of another clone -> exit 2" 2 "^local-mutants: refused — --resume $RD is an outcome directory of another clone \\($C\\)\$"
+reset_stub; echo 5 > "$STUB/list"; lm sh "$LM" "$C" "$BASE" ledger --resume "$T/tamper"
+failed "control: resume: the stored changes.diff differs from the fresh diff -> exit 2" 2 '^local-mutants: refused — the base or HEAD changed since that run; start a new one$'
+check_ "control: ... no cargo mutants call" 'nocall'
+reset_stub; echo 6 > "$STUB/list"; lm sh "$LM" "$C" "$BASE" ledger --resume "$RD"
+failed "control: resume: the listing changed (6, not the stored 5) -> exit 2" 2 '^local-mutants: refused — the base or HEAD changed since that run; start a new one$'
+check_ "control: ... only the --list call ran" '[ "$(grep -c "cargo mutants " "$STUB/cargo.log")" -eq 1 ] && grep -q "cargo mutants --list " "$STUB/cargo.log"'
+# MUTANTS_PG_DURABILITY=off (exchange D-156): durability off before the --list call, restored on every exit path.
+DBU='postgres://lm_user:s3cretpw@127.0.0.1:5433/lm_db'
+OFFC='psql -X -w -v ON_ERROR_STOP=1 -q -c ALTER SYSTEM SET fsync = off -c ALTER SYSTEM SET synchronous_commit = off -c ALTER SYSTEM SET full_page_writes = off -c SELECT pg_reload_conf()'
+ONC='psql -X -w -v ON_ERROR_STOP=1 -q -c ALTER SYSTEM SET fsync = on -c ALTER SYSTEM SET synchronous_commit = on -c ALTER SYSTEM SET full_page_writes = on -c SELECT pg_reload_conf()'
+offon(){ [ "$(grep -c "^psql " "$STUB/cargo.log")" -eq 2 ] && [ "$(grep -e "^psql " -e "cargo mutants " "$STUB/cargo.log" | head -n 1)" = "$OFFC" ] && [ "$(tail -n 1 "$STUB/cargo.log")" = "$ONC" ]; }
+split_ok(){ grep -qx "host=127.0.0.1 port=5433 user=lm_user db=lm_db url=set" "$STUB/psql.env" && [ "$(cat "$STUB/psql.pw")" = s3cretpw ] && ! grep -q -e s3cretpw -e "postgres:" "$STUB/cargo.log" "$STUB/systemd-run.log" "$T/out" "$T/err"; }
+reset_stub; echo 1 > "$STUB/list"; echo 1 > "$STUB/caught"; lm env MUTANTS_PG_DURABILITY=off DATABASE_URL="$DBU" sh "$LM" "$C" "$BASE" ledger
+printed "durability: MUTANTS_PG_DURABILITY=off, DATABASE_URL exported -> exit 0, the run: line" 0 "$(runline 1 0 1 0 0)"
+check_ "... the three off statements and pg_reload_conf before the first cargo mutants call, the three on statements after the run" 'offon'
+check_ "... psql got the URL split into PGHOST, PGPORT, PGUSER, PGDATABASE, PGPASSWORD; the URL is never on an argv or in any output" 'split_ok'
+check_ "... stderr says durability is off and restored at exit" 'grep -qx "local-mutants: durability off for this run (fsync, synchronous_commit, full_page_writes); restored at exit" "$T/err"'
+reset_stub; echo 1 > "$STUB/list"; echo 1 > "$STUB/caught"; printf 'DATABASE_URL=%s\n' "$DBU" > "$C/.env"; lm env MUTANTS_PG_DURABILITY=off sh "$LM" "$C" "$BASE" ledger
+printed "durability: DATABASE_URL only in the clone's .env -> exit 0, the run: line" 0 "$(runline 1 0 1 0 0)"
+check_ "... off before the run, on after it" 'offon'
+check_ "... read as data and split; never on an argv or in any output" 'split_ok'
+rm -f "$C/.env"
+reset_stub; echo 1 > "$STUB/list"; lm env MUTANTS_PG_DURABILITY=off sh "$LM" "$C" "$BASE" ledger
+failed "control: durability: no DATABASE_URL anywhere -> exit 2" 2 "^local-mutants: refused — MUTANTS_PG_DURABILITY=off needs DATABASE_URL in the environment or the clone's \\.env\$"
+check_ "control: ... no psql and no systemd-run call" '[ ! -e "$STUB/psql.env" ] && [ ! -e "$STUB/systemd-run.log" ]'
+reset_stub; echo 1 > "$STUB/list"; lm env MUTANTS_PG_DURABILITY=off DATABASE_URL='postgres://u:p%40ss@h/db?sslmode=disable' sh "$LM" "$C" "$BASE" ledger
+failed "control: durability: a URL this script cannot split (percent-encoding, a query) -> exit 2, the URL not echoed" 2 '^local-mutants: refused — DATABASE_URL is not a postgres:// URL this script can split'
+check_ "control: ... the URL is not in the message; no psql call" '! grep -q "p%40ss" "$T/err" && [ ! -e "$STUB/psql.env" ]'
+mkdir "$T/nopsql"; cp "$T/bin/systemd-run" "$T/nopsql/systemd-run"
+reset_stub; echo 1 > "$STUB/list"; lm env MUTANTS_PG_DURABILITY=off DATABASE_URL="$DBU" PATH="$T/nopsql:$T/sys" sh "$LM" "$C" "$BASE" ledger
+failed "control: durability: no psql on PATH -> exit 2" 2 '^local-mutants: refused — MUTANTS_PG_DURABILITY=off needs psql on PATH$'
+check_ "control: ... no systemd-run call" '[ ! -e "$STUB/systemd-run.log" ]'
+reset_stub; echo 1 > "$STUB/list"; echo 1 > "$STUB/psql.rc"; lm env MUTANTS_PG_DURABILITY=off DATABASE_URL="$DBU" sh "$LM" "$C" "$BASE" ledger
+failed "control: durability: psql fails turning it off -> exit 2, nothing run" 2 '^local-mutants: refused — durability could not be turned off \(psql rc=1\); nothing run$'
+check_ "control: ... no cargo mutants call; the on statements still ran (a partial off is restored)" 'nocall && [ "$(tail -n 1 "$STUB/cargo.log")" = "$ONC" ]'
+reset_stub; echo 1 > "$STUB/list"; echo 1 > "$STUB/caught"; echo 1 > "$STUB/psql.rc.on"; lm env MUTANTS_PG_DURABILITY=off DATABASE_URL="$DBU" sh "$LM" "$C" "$BASE" ledger
+printed "control: durability: the restore fails after a clean run -> exit 1 (the run: line printed)" 1 "$(runline 1 0 1 0 0)"
+check_ "control: ... the WARNING line on stderr" 'grep -qx "local-mutants: WARNING durability was not restored (psql rc=1): run the ALTER SYSTEM SET fsync, synchronous_commit, full_page_writes = on statements and SELECT pg_reload_conf() by hand" "$T/err"'
+reset_stub; echo 1 > "$STUB/list"; echo 1 > "$STUB/psql.rc"; echo 1 > "$STUB/psql.rc.on"; lm env MUTANTS_PG_DURABILITY=off DATABASE_URL="$DBU" sh "$LM" "$C" "$BASE" ledger
+failed "control: durability: off and restore both fail -> the exit 2 stays, with the WARNING" 2 '^local-mutants: WARNING durability was not restored \(psql rc=1\)'
+reset_stub; echo 1 > "$STUB/list"; touch "$STUB/term-parent"; lm env MUTANTS_PG_DURABILITY=off DATABASE_URL="$DBU" sh "$LM" "$C" "$BASE" ledger
+check_ "control: durability: TERM during the run -> exit 143, durability restored, the build lock released" '[ "$lrc" -eq 143 ] && [ "$(tail -n 1 "$STUB/cargo.log")" = "$ONC" ] && [ ! -e "$T/build.lock.d" ]'
+# HEAD moved since the first run (last: these commits change the clone's HEAD).
+echo 'pub fn z() {}' >> "$C/other/src/x.rs"; git -C "$C" commit -qam outside
+reset_stub; echo 5 > "$STUB/list"; lm sh "$LM" "$C" "$BASE" ledger --resume "$RD"
+failed "control: resume: HEAD moved (a commit outside <crate>/src, same diff) -> exit 2" 2 '^local-mutants: refused — the base or HEAD changed since that run; start a new one$'
+echo 'pub fn c() {}' >> "$C/ledger/src/lib.rs"; git -C "$C" commit -qam more
+reset_stub; echo 5 > "$STUB/list"; lm sh "$LM" "$C" "$BASE" ledger --resume "$RD"
+failed "control: resume: a commit added to the clone after the first run (the diff changed) -> exit 2" 2 '^local-mutants: refused — the base or HEAD changed since that run; start a new one$'
+check_ "control: ... no cargo mutants call for either" 'nocall'
 rm -rf "$T"; [ $R -eq 0 ] && echo "local-mutants.t: all cases behave" || echo "local-mutants.t: FAILURES"; exit $R
