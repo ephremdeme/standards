@@ -1,0 +1,104 @@
+#!/bin/sh
+# Usage: standards/bin/lane-verify <worktree> <base> [--section <instrument-id> <section-name>]
+# The integrator's lane acceptance in one read-only call (E4 retrospective A.1): runs this directory's own judges on a
+# lane worktree and prints one line per step. It never writes to GitHub or the repository.
+# Refused (exit 2, "lane-verify: refused — <reason>" on stderr): usage; <worktree> not an absolute path to the top level
+# of a git worktree holding TASK.md; <base> not a commit there; <instrument-id> not ^[a-z][a-z0-9_]*$ or
+# scripts/verify/<id>.sh missing in the worktree; <section-name> not ^[a-z][a-z0-9_-]*$.
+# Steps, each one line "lane-verify: <step> OK" or "lane-verify: <step> FAIL — <detail>", in this order (every step runs):
+#   tree        `git -C <wt> status --porcelain --untracked-files=all --ignore-submodules=none` is empty apart from
+#               "?? TASK.md"; the detail names the first other path (a failed status is a FAIL).
+#   branch      `git -C <wt> branch --show-current` is non-empty and equals TASK.md line 1 "Branch: <b>".
+#   task-lint   `sh <this dir>/task-lint <wt>` exits 0; on failure its "task-lint: FAIL" lines follow, at most 10.
+#   check-scope `sh <this dir>/check-scope <wt> <base>` exits 0; on failure its "scope violation:" lines follow, at most 10.
+#   risk        `sh <this dir>/classify-risk <base> HEAD` inside <wt>: always "lane-verify: risk LOW|HIGH", informational,
+#               never a step of the verdict; HIGH when the command fails or prints anything else.
+#   section     only with --section: `env -C <wt> bash scripts/verify/<id>.sh --section <name>`; its lines matching
+#               ^verify: or ^\[FAIL\] follow, at most 12; OK iff it exits 0 and prints "verify:<id> — N ok, 0 failed"
+#               (N >= 1, the em dash U+2014).
+# Then "lane-verify: OK (<n> steps)" exit 0, or "lane-verify: FAILED (<k> of <n> steps)" exit 1.
+set -u
+LC_ALL=C; export LC_ALL
+here=$(cd "$(dirname "$0")" && pwd -P) || { echo "lane-verify: cannot locate its own directory" >&2; exit 2; }
+refuse() { echo "lane-verify: refused — $1" >&2; exit 2; }
+usage="usage: lane-verify <worktree> <base> [--section <instrument-id> <section-name>]"
+sec=0; id=; name=
+case $# in
+  2) ;;
+  5) [ "$3" = --section ] || refuse "$usage"; sec=1; id=$4; name=$5;;
+  *) refuse "$usage";;
+esac
+wt=$1; base=$2
+case "$wt" in /*) ;; *) refuse "<worktree> '$wt' is not an absolute path";; esac
+[ -d "$wt" ] || refuse "$wt is not a directory"
+abs=$(cd "$wt" && pwd -P) || refuse "$wt cannot be entered"
+top=$(git -C "$abs" rev-parse --show-toplevel 2>/dev/null) || refuse "$wt is not a git worktree"
+top=$(cd "$top" && pwd -P) || refuse "$wt is not a git worktree"
+[ "$top" = "$abs" ] || refuse "$wt is not the top level of its git worktree ($top is)"
+[ -f "$abs/TASK.md" ] && [ -r "$abs/TASK.md" ] || refuse "no readable TASK.md in $wt"
+case "$base" in ''|-*) refuse "<base> '$base' is not a commit in $wt";; esac
+git -C "$abs" rev-parse --verify -q "$base^{commit}" >/dev/null 2>&1 || refuse "<base> '$base' is not a commit in $wt"
+if [ $sec -eq 1 ]; then
+  case "$id" in [a-z]*) ;; *) refuse "<instrument-id> '$id' does not match ^[a-z][a-z0-9_]*\$";; esac
+  case "$id" in *[!a-z0-9_]*) refuse "<instrument-id> '$id' does not match ^[a-z][a-z0-9_]*\$";; esac
+  [ -f "$abs/scripts/verify/$id.sh" ] || refuse "scripts/verify/$id.sh is missing in $wt"
+  case "$name" in [a-z]*) ;; *) refuse "<section-name> '$name' does not match ^[a-z][a-z0-9_-]*\$";; esac
+  case "$name" in *[!a-z0-9_-]*) refuse "<section-name> '$name' does not match ^[a-z][a-z0-9_-]*\$";; esac
+fi
+
+steps=0; nfail=0
+ok() { steps=$((steps + 1)); echo "lane-verify: $1 OK"; }
+fail() { steps=$((steps + 1)); nfail=$((nfail + 1))
+  d=$(printf '%s' "$2" | tr '\n\r' '  ' | cut -c1-200); echo "lane-verify: $1 FAIL — $d"; }
+firstline() { printf '%s\n' "$1" | grep -v '^$' | head -n 1; }
+
+# tree
+if st=$(git -C "$abs" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null); then
+  other=$(printf '%s\n' "$st" | grep -vx -e '?? TASK.md' -e '' | head -n 1)
+  if [ -z "$other" ]; then ok tree; else fail tree "not clean: ${other#???}"; fi
+else fail tree "git status failed"; fi
+
+# branch
+l1=$(head -n 1 "$abs/TASK.md" 2>/dev/null) || l1=
+tb=${l1#Branch: }
+if ! cur=$(git -C "$abs" branch --show-current 2>/dev/null); then fail branch "git branch --show-current failed"
+elif [ -z "$cur" ]; then fail branch "detached HEAD (no current branch)"
+elif [ "$l1" = "$tb" ] || [ -z "$tb" ]; then fail branch "TASK.md line 1 is not 'Branch: <b>'"
+elif [ "$cur" != "$tb" ]; then fail branch "TASK.md says $tb, the worktree is on $cur"
+else ok branch; fi
+
+# task-lint
+out=$(sh "$here/task-lint" "$abs" 2>&1); rc=$?
+if [ $rc -eq 0 ]; then ok task-lint
+else
+  fail task-lint "exit $rc: $(printf '%s\n' "$out" | tail -n 1)"
+  printf '%s\n' "$out" | grep -- '^task-lint: FAIL' | head -n 10
+fi
+
+# check-scope
+out=$(sh "$here/check-scope" "$abs" "$base" 2>&1); rc=$?
+if [ $rc -eq 0 ]; then ok check-scope
+else
+  if [ $rc -eq 1 ]; then d="exit 1: paths outside TASK §3"; else d="exit $rc: $(firstline "$out")"; fi
+  fail check-scope "$d"
+  printf '%s\n' "$out" | grep -- '^scope violation:' | head -n 10
+fi
+
+# risk (informational, never a step)
+lvl=$(cd "$abs" && sh "$here/classify-risk" "$base" HEAD 2>/dev/null) || lvl=HIGH
+case "$lvl" in LOW|HIGH) ;; *) lvl=HIGH;; esac
+echo "lane-verify: risk $lvl"
+
+# section
+if [ $sec -eq 1 ]; then
+  out=$(env -C "$abs" bash "scripts/verify/$id.sh" --section "$name" 2>&1); rc=$?
+  shown=$(printf '%s\n' "$out" | grep -E -- '^(verify:|\[FAIL\])' | head -n 12)
+  good=$(printf '%s\n' "$out" | grep -E -- "^verify:$id — [0-9]*[1-9][0-9]* ok, 0 failed\$" | head -n 1)
+  if [ $rc -ne 0 ]; then fail section "scripts/verify/$id.sh --section $name exited $rc"
+  elif [ -z "$good" ]; then fail section "no verify:$id — N ok, 0 failed line (N >= 1)"
+  else ok section; fi
+  [ -z "$shown" ] || printf '%s\n' "$shown"
+fi
+
+if [ $nfail -eq 0 ]; then echo "lane-verify: OK ($steps steps)"; exit 0; fi
+echo "lane-verify: FAILED ($nfail of $steps steps)"; exit 1
