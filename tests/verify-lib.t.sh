@@ -61,7 +61,7 @@ I="$P/scripts/verify/m0.sh"; cd "$P" || exit 1   # the instrument cds to the top
 want "sourcing takes the verify lock and the build lock" 0 'build lock held' bash "$I" --section locks
 want "... (the verify lock too)" 0 'verify lock held' bash "$I" --section locks
 [ ! -e "$T/verify.lock.d" ] && [ ! -e "$T/build.lock.d" ] && ok "both locks are released on exit" || bad "a lock was left behind"
-mkdir "$T/build.lock.d"; printf 'token=x\npid=999999999\nwho=other-session\nsince=2026-10-03T10:00:00Z\ncwd=/x\n' > "$T/build.lock.d/owner"
+mkdir "$T/build.lock.d"; printf 'token=x\npid=999999999\nwho=other-session\nsince=%s\ncwd=/x\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$T/build.lock.d/owner"
 want "control: a foreign build lock with BUILD_LOCK_WAIT=0 -> exit 3" 3 '^verify: refused — the machine build lock is held by other-session' env BUILD_LOCK_WAIT=0 bash "$I" --section locks
 [ ! -e "$T/verify.lock.d" ] && [ -f "$T/build.lock.d/owner" ] && ok "control: ... the verify lock is released, the foreign build lock untouched" || bad "lock state after a build-lock refusal"
 rm -f "$T/build.lock.d/owner"; rmdir "$T/build.lock.d"

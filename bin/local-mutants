@@ -52,10 +52,11 @@
 # log line; psql must be on PATH. Before the --list call, `psql -X -w -v ON_ERROR_STOP=1 -q` runs `ALTER SYSTEM SET
 # fsync = off`, `... synchronous_commit = off`, `... full_page_writes = off` and `SELECT pg_reload_conf()` (its output
 # to stderr); stderr says "local-mutants: durability off for this run (fsync, synchronous_commit, full_page_writes);
-# restored at exit". From just before that call, every exit (EXIT, HUP 129, INT 130, TERM 143; signals ignored during
-# the restore) runs the same four statements with `on`; a failed restore prints "local-mutants: WARNING durability was
-# not restored (psql rc=<n>): ..." on stderr and turns an exit 0 into 1 (a non-zero exit stays), and the build lock is
-# released after it.
+# restored at exit". From just before that call, every exit (EXIT, HUP 129, INT 130, QUIT 131, PIPE 141, TERM 143;
+# those signals ignored during the restore) runs the same four statements with `on`; a failed restore prints
+# "local-mutants: WARNING durability was not restored (psql rc=<n>): ..." on stderr and turns an exit 0 into 1 (a
+# non-zero exit stays), and the build lock is released after it. Residual: SIGKILL (or the kernel's OOM killer on this
+# shell) runs no trap, so durability stays off; run the ALTER SYSTEM ... = on statements and pg_reload_conf() by hand.
 # Exit 0 iff missed + timeout = 0 and cargo mutants exited 0 (and durability, when turned off, was restored). Exit 1
 # with the line: survivors (missed or timeout), or a failed durability restore. Exit 1 without it: an incomplete run
 # (tested != listed), cargo mutants failing (--list, a red baseline, any exit other than 0/2/3, an exit 2/3 its outcome
@@ -68,7 +69,10 @@
 # missing or unable to create the scope or read its memory.max; "memory cap not enforced" (the scope's memory.max is
 # not the cap in bytes); not a disposable clone; <base> not a commit; no file in scope; a changed file name the run:
 # line cannot carry; --resume of a directory that is not this clone's outcome directory, or whose diff, base, HEAD or
-# listing changed. Exit 3: the build lock is held elsewhere after BUILD_LOCK_WAIT.
+# listing changed. Exit 2 with build-lock's own message instead ("build-lock: BUILD_LOCK_WAIT must be a whole number of
+# seconds", "build-lock: BUILD_LOCK_STALE must be a whole number of seconds"): a bad BUILD_LOCK_WAIT or BUILD_LOCK_STALE.
+# Exit 3: the build lock is held elsewhere after BUILD_LOCK_WAIT (a dead holder's lock older than BUILD_LOCK_STALE is
+# taken first, bin/build-lock.sh).
 set -u
 PATH="$HOME/.cargo/bin:$PATH"; export PATH
 LC_ALL=C; export LC_ALL
@@ -183,7 +187,7 @@ pg_run() {
 }
 # The EXIT trap once durability may be off: restore it (signals ignored meanwhile), then release the build lock.
 on_exit() {
-  ec=$?; trap - EXIT; trap '' HUP INT TERM
+  ec=$?; trap - EXIT; trap '' HUP INT TERM QUIT PIPE
   if [ "${dur_live:-0}" = 1 ]; then
     dur_live=0; pg_run on; drc=$?
     if [ $drc -ne 0 ]; then
@@ -234,7 +238,7 @@ build_lock_env || exit 1
 echo "local-mutants: compiler cache: $cache; MemoryMax=$mm; outcomes in $out" >&2
 if [ "$dur" = off ]; then
   dur_live=1
-  trap on_exit EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+  trap on_exit EXIT; trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 131' QUIT; trap 'exit 141' PIPE
   pg_run off; prc=$?
   [ $prc -eq 0 ] || refuse "durability could not be turned off (psql rc=$prc); nothing run"
   echo "local-mutants: durability off for this run (fsync, synchronous_commit, full_page_writes); restored at exit" >&2
@@ -250,8 +254,12 @@ if [ "$listed" -gt 0 ]; then
   if [ $resume_set -eq 1 ]; then
     # The earlier caught and unviable, copied aside before cargo mutants rewrites mutants.out.
     mkdir -p "$ud" || fail "could not create $ud"
+    # Every earlier record that exists: the last union, the last copy aside (a resumed run that was itself interrupted
+    # never wrote a union) and mutants.out; built in a temp file, then moved into place.
     for kind in caught unviable; do
-      if [ -f "$ud/$kind.txt" ]; then sort -u "$ud/$kind.txt" "$o/$kind.txt" > "$ud/$kind.prev"; else sort -u "$o/$kind.txt" > "$ud/$kind.prev"; fi \
+      set --
+      for f in "$ud/$kind.txt" "$ud/$kind.prev" "$o/$kind.txt"; do [ ! -f "$f" ] || set -- "$@" "$f"; done
+      { sort -u "$@" > "$ud/$kind.prev.tmp" && mv "$ud/$kind.prev.tmp" "$ud/$kind.prev"; } \
         || fail "could not copy the earlier $kind mutants aside to $ud/$kind.prev"
     done
   fi

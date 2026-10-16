@@ -45,7 +45,7 @@ case "$1" in
         while [ "$i" -lt "$n" ]; do i=$((i + 1)); echo "ledger/src/lib.rs:$i:5: replace f$i -> bool with true"; done; exit 0;;
     esac
     [ -e "$STUB/no-outcomes" ] && exit 0
-    [ -e "$STUB/term-parent" ] && kill -TERM "$PPID"
+    [ -s "$STUB/signal-parent" ] && kill -"$(cat "$STUB/signal-parent")" "$PPID"
     mkdir -p "$o/mutants.out"
     for k in caught missed timeout unviable; do   # <kind>.from: the numbering starts after it (a resumed run's new mutants)
       : > "$o/mutants.out/$k.txt"; i=$(cat "$STUB/$k.from" 2>/dev/null || echo 0); n=$((i + $(cat "$STUB/$k" 2>/dev/null || echo 0)))
@@ -230,6 +230,14 @@ check_ "... the --list call read the stored changes.diff" 'grep -Fq "cargo mutan
 reset_stub; echo 5 > "$STUB/list"; echo 2 > "$STUB/caught"; lm sh "$LM" "$C" "$BASE" ledger --resume "$RD" --tests e3_model
 printed "resume: a second resume (options in the other order), every mutant caught before -> the union still counts 5 -> exit 0" 0 "$(runline 5 0 5 0 0)"
 check_ "... --test e3_model follows -- with --iterate before it" 'grep -Fq -- "-o $RD --iterate -- -E not test(=random_sessions_match_model) --test e3_model" "$STUB/cargo.log"'
+# Review round (major): a resume of a resumed run that was itself interrupted keeps the first run's outcomes.
+reset_stub; echo 5 > "$STUB/list"; echo 2 > "$STUB/caught"; lm sh "$LM" "$C" "$BASE" ledger
+R0D=$(sed -n 's/^local-mutants: compiler cache: .*; outcomes in //p' "$T/err")
+reset_stub; echo 5 > "$STUB/list"; echo 1 > "$STUB/caught"; echo 2 > "$STUB/caught.from"; echo 1 > "$STUB/mutants.rc"; lm sh "$LM" "$C" "$BASE" ledger --resume "$R0D"
+failed "resume chain: R0 stopped after 2 caught; R1 resumes it and fails (rc=1) after 1 more caught -> exit 1" 1 '^local-mutants: cargo mutants failed \(rc=1\); log: '
+reset_stub; echo 5 > "$STUB/list"; echo 2 > "$STUB/caught"; echo 3 > "$STUB/caught.from"; lm sh "$LM" "$C" "$BASE" ledger --resume "$R0D"
+printed "resume chain: R2 completes -> caught 5 = R0's 2 + R1's 1 + R2's 2, tested 5 = listed -> exit 0" 0 "$(runline 5 0 5 0 0)"
+check_ "... no temp file left in union/" '! ls "$R0D/union" | grep -q tmp'
 echo 'ledger/src/lib.rs:1:5: replace f1 (missed)' >> "$T/dup/mutants.out/caught.txt"
 reset_stub; echo 5 > "$STUB/list"; echo 1 > "$STUB/missed"; echo 2 > "$STUB/mutants.rc"; lm sh "$LM" "$C" "$BASE" ledger --resume "$T/dup"
 failed "control: resume: a mutant caught before and missed now -> exit 1, never counted twice" 1 "^local-mutants: a mutant is named under two outcomes after --resume \\(caught or unviable before, another outcome now\\); see $T/dup/union\$"
@@ -282,8 +290,10 @@ printed "control: durability: the restore fails after a clean run -> exit 1 (the
 check_ "control: ... the WARNING line on stderr" 'grep -qx "local-mutants: WARNING durability was not restored (psql rc=1): run the ALTER SYSTEM SET fsync, synchronous_commit, full_page_writes = on statements and SELECT pg_reload_conf() by hand" "$T/err"'
 reset_stub; echo 1 > "$STUB/list"; echo 1 > "$STUB/psql.rc"; echo 1 > "$STUB/psql.rc.on"; lm env MUTANTS_PG_DURABILITY=off DATABASE_URL="$DBU" sh "$LM" "$C" "$BASE" ledger
 failed "control: durability: off and restore both fail -> the exit 2 stays, with the WARNING" 2 '^local-mutants: WARNING durability was not restored \(psql rc=1\)'
-reset_stub; echo 1 > "$STUB/list"; touch "$STUB/term-parent"; lm env MUTANTS_PG_DURABILITY=off DATABASE_URL="$DBU" sh "$LM" "$C" "$BASE" ledger
+reset_stub; echo 1 > "$STUB/list"; echo TERM > "$STUB/signal-parent"; lm env MUTANTS_PG_DURABILITY=off DATABASE_URL="$DBU" sh "$LM" "$C" "$BASE" ledger
 check_ "control: durability: TERM during the run -> exit 143, durability restored, the build lock released" '[ "$lrc" -eq 143 ] && [ "$(tail -n 1 "$STUB/cargo.log")" = "$ONC" ] && [ ! -e "$T/build.lock.d" ]'
+reset_stub; echo 1 > "$STUB/list"; echo QUIT > "$STUB/signal-parent"; lm env MUTANTS_PG_DURABILITY=off DATABASE_URL="$DBU" sh "$LM" "$C" "$BASE" ledger
+check_ "control: durability: QUIT during the run -> exit 131, durability restored, the build lock released" '[ "$lrc" -eq 131 ] && [ "$(tail -n 1 "$STUB/cargo.log")" = "$ONC" ] && [ ! -e "$T/build.lock.d" ]'
 # HEAD moved since the first run (last: these commits change the clone's HEAD).
 echo 'pub fn z() {}' >> "$C/other/src/x.rs"; git -C "$C" commit -qam outside
 reset_stub; echo 5 > "$STUB/list"; lm sh "$LM" "$C" "$BASE" ledger --resume "$RD"

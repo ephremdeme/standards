@@ -78,8 +78,22 @@ notaken "control: pid 0<live pid> (a leading zero names no /proc entry) -> held"
 notaken "control: since=yesterday (not the owner file's own format) -> held" 999999999 yesterday
 notaken "control: since=2026-13-45T99:00:00Z (does not parse) -> held" 999999999 2026-13-45T99:00:00Z
 notaken "control: a live holder's lock older than BUILD_LOCK_STALE=1 -> held" "$LIVE" 2026-10-03T10:00:00Z BUILD_LOCK_STALE=1
+mkdir "$L"; printf 'pid=999999999\nwho=other-session\nsince=2026-10-03T10:00:00Z\ncwd=/elsewhere\n' > "$L/owner"
+want "control: an owner file without token= (dead pid, old since) -> held, exit 3" 3 '^with-build-lock: refused — the machine build lock is held by other-session' \
+  env BUILD_LOCK_WAIT=0 sh -c 'cd "$1" && sh "$2" true' _ "$A" "$WBL"
+check_ "control: ... the token-less owner file is untouched" '[ "$(cat "$L/owner")" = "$(printf "pid=999999999\nwho=other-session\nsince=2026-10-03T10:00:00Z\ncwd=/elsewhere")" ]'
+unforeign
+# Review round (blocker): two waiters in lockstep on one dead old lock. The take never vacates the lock path (the owner
+# file is renamed aside, never the directory), so one takes it and the other waits: never two holders at once.
+foreign; : > "$T/lockstep.log"; printf 'echo start >> "$1"; sleep 1; echo end >> "$1"\n' > "$T/step.sh"
+env BUILD_LOCK_WAIT=30 sh -c 'cd "$1" && sh "$2" sh "$3/step.sh" "$3/lockstep.log"' _ "$A" "$WBL" "$T" > "$T/ls1.err" 2>&1 & LS1=$!
+env BUILD_LOCK_WAIT=30 sh -c 'cd "$1" && sh "$2" sh "$3/step.sh" "$3/lockstep.log"' _ "$A" "$WBL" "$T" > "$T/ls2.err" 2>&1 & LS2=$!
+wait "$LS1"; LR1=$?; wait "$LS2"; LR2=$?
+check_ "two waiters in lockstep on a dead old lock -> both exit 0, start/end strictly one pair after the other" '[ "$LR1" -eq 0 ] && [ "$LR2" -eq 0 ] && [ "$(tr "\n" " " < "$T/lockstep.log")" = "start end start end " ]'
+check_ "... exactly one of them took the stale lock" '[ "$(cat "$T/ls1.err" "$T/ls2.err" | grep -c "^build-lock: took the stale lock of other-session")" -eq 1 ]'
+check_ "... the lock dir is gone and no owner.stale.* or build.lock.d.* is left" '[ ! -e "$L" ] && ! ls -a "$T" | grep -q "^build\.lock\.d\."'
 lockfile 999999999 "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-want "waiting on a dead holder's young lock names the rule and the manual removal" 3 "^build-lock: pid 999999999 is not running — the lock is possibly stale; it is taken automatically once older than BUILD_LOCK_STALE=900s; by hand: rm .*/build\\.lock\\.d/owner && rmdir .*/build\\.lock\\.d\$" \
+want "waiting on a dead holder's young lock names the rule and the manual removal" 3 "^build-lock: pid 999999999 is not running — the lock is possibly stale; it is taken automatically once older than BUILD_LOCK_STALE=900s \\(its owner file renamed aside, never the directory\\); by hand: rm -f .*/build\\.lock\\.d/owner .*/build\\.lock\\.d/owner\\.stale\\.\\* && rmdir .*/build\\.lock\\.d\$" \
   env BUILD_LOCK_WAIT=1 sh -c 'cd "$1" && sh "$2" true' _ "$A" "$WBL"
 unforeign
 want "nested with-build-lock re-enters through the token; the lock stays until the outer exits" 0 '^nested-ok$' \
