@@ -76,7 +76,7 @@ has(){ # has <label> <rc> <regex>...
 lacks(){ # lacks <label> <regex> — the last run() printed no such line
   if printf '%s\n' "$out" | grep -Eq -- "$2"; then bad "$1"; else ok "$1"; fi; }
 VL="$T/verify.lock.d"
-untilheld(){ i=0; while [ ! -d "$VL" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done; }
+untilheld(){ i=0; while [ ! -f "$VL/owner" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done; }
 fake(){ mkdir "$VL"; printf 'token=999-1-deadbeef\npid=%s\nwho=other-chain\nsince=2026-10-16T10:00:00Z\ncwd=/elsewhere\n' "$1" > "$VL/owner"; cp "$VL/owner" "$T/owner.orig"; }
 unfake(){ chmod 600 "$VL/owner" 2>/dev/null; rm -f "$VL/owner"; rmdir "$VL"; }
 untouched(){ [ -d "$VL" ] && cmp -s "$VL/owner" "$T/owner.orig" && ok "$1" || bad "$1"; }
@@ -106,13 +106,23 @@ mkdir "$T/build.lock.d"; printf 'token=777-1-cafecafe\npid=%s\nwho=dispatch\nsin
 run env BUILD_LOCK_TOKEN=777-1-cafecafe VERIFY_LOCK_WAIT=30 VERIFY_LOCK_POLL=1 bash "$I" --section locks
 has "lock: a run that already holds the build lock refuses a held verify lock at once (lock order verify -> build)" 3 \
   '^verify: refused — the verify lock is held by other-chain .* after waiting 0s; '
+run env BUILD_LOCK_TOKEN=888-1-feedfeed VERIFY_LOCK_WAIT=2 VERIFY_LOCK_POLL=1 bash "$I" --section locks
+has "lock: a run with a foreign BUILD_LOCK_TOKEN still waits" 3 \
+  "^verify: waiting for the verify lock held by other-chain \(pid $SP, " '^verify: refused — the verify lock is held by other-chain .* after waiting 2s; '
 rm -f "$T/build.lock.d/owner"; rmdir "$T/build.lock.d"; unfake
+if [ "$(id -u)" -ne 0 ]; then
+  run sh -c 'umask 0277; exec bash "$1" --section locks' _ "$I"
+  has "lock: a failed owner write removes its own lock dir" 1 '^verify-lib: could not write .*/owner$'
+  [ ! -e "$VL" ] && ok "... no lock dir left" || { bad "... the lock dir was left behind"; rmdir "$VL"; }
+fi
 for v in abc 1234567 -1 ''; do
   run env VERIFY_LOCK_WAIT="$v" bash "$I" --section locks
   has "lock: a bad VERIFY_LOCK_WAIT exits 2 ('$v')" 2 '^verify-lib: VERIFY_LOCK_WAIT must be a whole number of seconds$'
 done
-run env VERIFY_LOCK_POLL=0 bash "$I" --section locks
-has "... and a bad VERIFY_LOCK_POLL (0) exits 2" 2 '^verify-lib: VERIFY_LOCK_POLL must be a whole number of seconds, at least 1$'
+for v in 0 abc ''; do
+  run env VERIFY_LOCK_POLL="$v" bash "$I" --section locks
+  has "... and a bad VERIFY_LOCK_POLL ('$v') exits 2" 2 '^verify-lib: VERIFY_LOCK_POLL must be a whole number of seconds, at least 1$'
+done
 fake 999999999
 run env VERIFY_LOCK_WAIT=2 VERIFY_LOCK_POLL=1 bash "$I" --section locks
 has "lock: a stale holder is named and never removed" 3 \

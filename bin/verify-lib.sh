@@ -53,11 +53,12 @@ while ! mkdir "$VERIFY_LOCK" 2>/dev/null; do
   sleep "$_vl_step"; _vl_waited=$((_vl_waited + _vl_step))
 done
 # Ours from here. Until the owner file is in place (_vl_written=0) nobody else can hold the directory, so release removes it
-# with the tmp file; afterwards only while the owner file still carries our token.
+# with the tmp file (rmdir fails if the mv already happened) and falls through; otherwise only while the owner file still
+# carries our token (also the case of a signal between the mv and _vl_written=1).
 verify_lock_release() {
   [ "${VERIFY_LOCK_HELD:-0}" = 1 ] || return 0
   VERIFY_LOCK_HELD=0
-  if [ "$_vl_written" = 0 ]; then rm -f "$VERIFY_LOCK/owner.$$"; rmdir "$VERIFY_LOCK" 2>/dev/null; return 0; fi
+  if [ "$_vl_written" = 0 ]; then rm -f "$VERIFY_LOCK/owner.$$"; rmdir "$VERIFY_LOCK" 2>/dev/null; fi
   if [ "$(sed -n 's/^token=//p' "$VERIFY_LOCK/owner" 2>/dev/null | head -n 1)" = "$VERIFY_LOCK_TOKEN" ]; then
     rm -f "$VERIFY_LOCK/owner"; rmdir "$VERIFY_LOCK" 2>/dev/null
   fi
