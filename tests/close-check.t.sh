@@ -100,7 +100,7 @@ want "control codex: a codex-last-read that is not an ancestor of HEAD -> FAIL c
 mk codex-untracked; git -C "$V" rm -q docs/md-reports/e9-milestone-review.md; cm unreview
 printf '# e9 review\ncodex-last-read: %s\n' "$C2" > "$V/docs/md-reports/e9-milestone-review.md"
 prj "$(git -C "$V" rev-parse HEAD)" $LABELS
-want "control codex: an untracked review file (merge-pr reads it at the sha) -> FAIL codex" 1 '^close-check: FAIL codex — docs/md-reports/e9-milestone-review.md is not committed at HEAD$' sh "$CC" "$V" e9 7
+want "control codex: an untracked review file (merge-pr reads it at the sha) -> FAIL codex" 1 '^close-check: FAIL codex — docs/md-reports/e9-milestone-review.md is not a file committed at HEAD$' sh "$CC" "$V" e9 7
 check_ "control codex (untracked): only the codex row fails" 'printf "%s\n" "$out" | tail -n 1 | grep -qx "close-check: FAILED (1 of 6 rows)"'
 # mutants
 mk surv; printf '# e9 mutants\nrun: %s files: ledger/src/x.rs tested: 5 missed: 0 caught: 4 unviable: 1 timeout: 0\nopen survivors: 1\n' "$C1" > "$V/docs/md-reports/e9-mutants.md"; cm surv; rv
@@ -123,6 +123,10 @@ mk nocommit; printf '# e9 mutants\nrun: deadbeefdeadbeef files: ledger/src/x.rs 
 want "control mutants: a run: sha that is not a commit -> FAIL mutants" 1 '^close-check: FAIL mutants — run deadbeefdeadbeef is not a commit here$' sh "$CC" "$V" e9 7
 mk nochain; printf '# e9 close\n%s\n' "$TOK" > "$V/docs/md-reports/e9.md"; cm nochain; rv
 want "control report: no full chain: line -> FAIL report" 1 "^close-check: FAIL report — docs/md-reports/e9.md: no 'full chain: ' line\$" sh "$CC" "$V" e9 7
+mk dirreport; git -C "$V" rm -q docs/md-reports/e9.md; mkdir "$V/docs/md-reports/e9.md"
+: > "$V/docs/md-reports/e9.md/full chain: x"; : > "$V/docs/md-reports/e9.md/Tokens: integrator avg_ctx=1k calls_per_merge=1; lanes avg_ctx=1k requests=1; codex reads=1"
+cm dirreport; rv
+want "control report: a directory named like the report, its entry names the required lines -> FAIL report (blobs only)" 1 '^close-check: FAIL report — docs/md-reports/e9.md is not a file committed at HEAD$' sh "$CC" "$V" e9 7
 # report
 mk report; printf '# e9 close\nfull chain: green at the merge head\n' > "$V/docs/md-reports/e9.md"; cm report; rv
 want "control report: no Tokens line -> FAIL report" 1 '^close-check: FAIL report — docs/md-reports/e9.md: no Tokens: line' sh "$CC" "$V" e9 7
