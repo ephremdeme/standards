@@ -162,8 +162,8 @@ expect_fail "instrument: an unknown --section runs no checks and is refused (ret
 perl -pi -e 's/a \+ b/a + b + 1/' web/src/math.ts
 expect_fail "instrument: red when the code is wrong" "scripts/verify/m0.sh --section web" '\[FAIL\] web: T1 passes'
 git checkout -q -- web/src/math.ts
-mkdir "$T/verify.lock.d"; scripts/verify/m0.sh --section web > "$T/lockout" 2>&1; echo "rc=$?" >> "$T/lockout"; rmdir "$T/verify.lock.d"
-grep -q "rc=3" "$T/lockout" && grep -q "another verify chain" "$T/lockout" && ok "instrument: second concurrent verify chain is refused" || bad "instrument lock"
+mkdir "$T/verify.lock.d"; VERIFY_LOCK_WAIT=0 scripts/verify/m0.sh --section web > "$T/lockout" 2>&1; echo "rc=$?" >> "$T/lockout"; rmdir "$T/verify.lock.d"
+grep -q "rc=3" "$T/lockout" && grep -q "refused — the verify lock is held" "$T/lockout" && ok "instrument: second concurrent verify chain is refused" || bad "instrument lock"
 git add -A >/dev/null; git commit -qm instrument
 out=$(standards/bin/new-lane.sh opus/lock-timing main)
 W="$T/game/.worktrees/opus-lock-timing"
