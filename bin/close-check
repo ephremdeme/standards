@@ -1,0 +1,227 @@
+#!/bin/sh
+# Usage: standards/bin/close-check <repo-dir> <mN> <pr> [--log <path>] [--repo <owner/repo>]
+# The integrator's milestone-close checklist in one read-only call (E4 retrospective A.1): it predicts what
+# bin/merge-pr --milestone <mN> will judge, from the local checkout and `gh pr view` only. It never writes to GitHub or
+# the repository (`gh pr view` is its only gh call; temporary files only under mktemp).
+# Refused (exit 2, "close-check: refused — <reason>" on stderr): usage; <repo-dir> is not the top level of a git
+# checkout with a commit; <mN> not ^[a-z][a-z0-9_]*$; <pr> not digits; --repo not ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$;
+# without --repo, `git remote get-url origin` is not a github.com URL (https://, ssh:// or git@) of ephremdeme/<name>;
+# --log not a readable file; jq not found.
+# Rows, each exactly one line "close-check: PASS <row>" or "close-check: FAIL <row> — <detail>", in this order:
+#   head     PASS line "close-check: PASS head <40-hex HEAD>"; FAIL when `git status --porcelain --untracked-files=no
+#            --ignore-submodules=none` is non-empty (the first path named) or fails.
+#   pr       gh pr view <pr> --repo <r> --json state,isDraft,headRefOid,isCrossRepository: state OPEN, not a draft, not
+#            cross-repository, headRefOid = HEAD. Any gh or jq failure, or a missing or mistyped field, is a FAIL.
+#   labels   gh pr view <pr> --repo <r> --json labels: founder-approved and human-gate-accepted both present (presence
+#            only; the timing rule is merge-pr's); the detail names the missing one(s). gh/jq failure = FAIL.
+#   The three reports below are read as committed at HEAD (`git show HEAD:<file>`, as merge-pr reads them at the sha
+#   through the contents API), never from the working tree; only a blob is read (`git cat-file -t` = blob): a missing
+#   path or a tree is "FAIL <row> — <file> is not a file committed at HEAD".
+#   codex    docs/md-reports/<mN>-milestone-review.md holds exactly one line starting "codex-last-read:", which is
+#            "codex-last-read: <X>" (40 lowercase hex); PASS when X = HEAD, or X is a commit, an ancestor of HEAD, and
+#            `git diff --name-only X HEAD` lists nothing but that review file.
+#   mutants  docs/md-reports/<mN>-mutants.md exists; its last non-empty line is exactly "open survivors: 0"; every line
+#            starting "run:" matches ^run: [0-9a-f]{7,40} files: .+ tested: N missed: N caught: N unviable: N timeout: N$
+#            (a malformed run: line is a FAIL, never skipped; at least one run: line is required); for each, tested =
+#            missed + caught + unviable + timeout, the sha is a commit here, and for each <crate> (the first path segment
+#            of each comma- or space-separated files: entry; an entry without a "/" is a FAIL) <crate>/src exists at the
+#            sha (`git cat-file -e`; a pathspec in neither tree would diff clean) and `git diff --quiet <sha> HEAD --
+#            <crate>/src` exits 0 (1 = changed since the run; any other status = FAIL).
+#   report   docs/md-reports/<mN>.md has a line starting "full chain: " and one matching ^Tokens: integrator
+#            avg_ctx=[0-9]+k calls_per_merge=[0-9]+; lanes avg_ctx=[0-9]+k requests=[0-9]+; codex reads=[0-9]+$.
+#   gate     only with --log: `bin/gate-summary <path> --id <mN>` (this script's sibling) exits 0 and its <sha> = HEAD;
+#            the detail is gate-summary's red reason (or its refusal).
+# Then "close-check: OK (<n> rows)" exit 0, or "close-check: FAILED (<k> of <n> rows)" exit 1. Every row is
+# evaluated; every read is captured first and its status judged, so a failed command or an empty read is a FAIL.
+# Output <= 10 lines (one per row, details folded to one line). `gh` and `jq` are found on PATH.
+set -u
+set -f  # word splitting below never expands globs
+LC_ALL=C; export LC_ALL
+GIT_OPTIONAL_LOCKS=0; export GIT_OPTIONAL_LOCKS   # git status never takes index.lock in the integrator's checkout
+GIT_NO_REPLACE_OBJECTS=1; export GIT_NO_REPLACE_OBJECTS
+unset GH_HOST GH_REPO
+here=$(cd "$(dirname "$0")" && pwd -P) || { echo "close-check: cannot locate its own directory" >&2; exit 2; }
+refuse() { echo "close-check: refused — $1" >&2; exit 2; }
+usage="usage: close-check <repo-dir> <mN> <pr> [--log <path>] [--repo <owner/repo>]"
+[ $# -ge 3 ] || refuse "$usage"
+dir=$1; m=$2; pr=$3; shift 3
+log=; log_set=0; r=; r_set=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --log) [ $# -ge 2 ] && [ $log_set -eq 0 ] || refuse "$usage"; log=$2; log_set=1; shift 2;;
+    --repo) [ $# -ge 2 ] && [ $r_set -eq 0 ] || refuse "$usage"; r=$2; r_set=1; shift 2;;
+    *) refuse "$usage";;
+  esac
+done
+case "$m" in [a-z]*) ;; *) refuse "<mN> '$m' does not match ^[a-z][a-z0-9_]*\$";; esac
+case "$m" in *[!a-z0-9_]*) refuse "<mN> '$m' does not match ^[a-z][a-z0-9_]*\$";; esac
+case "$pr" in ''|*[!0-9]*) refuse "<pr> '$pr' is not a number";; esac
+command -v jq >/dev/null 2>&1 || refuse "jq is required"
+[ -d "$dir" ] || refuse "$dir is not a directory"
+abs=$(cd "$dir" && pwd -P) || refuse "$dir cannot be entered"
+top=$(git -C "$abs" rev-parse --show-toplevel 2>/dev/null) || refuse "$dir is not a git checkout"
+top=$(cd "$top" && pwd -P) || refuse "$dir is not a git checkout"
+[ "$top" = "$abs" ] || refuse "$dir is not the top level of its git checkout ($top is)"
+head=$(git -C "$abs" rev-parse --verify -q 'HEAD^{commit}' 2>/dev/null) || refuse "$dir has no commit"
+case "$head" in *[!0-9a-f]*|'') refuse "HEAD of $dir is not a hex sha";; esac
+[ ${#head} -eq 40 ] || refuse "HEAD of $dir is not a 40-hex sha"
+name_ok() { case "$1" in ''|*[!A-Za-z0-9_.-]*) return 1;; esac; }
+if [ $r_set -eq 1 ]; then
+  o=${r%%/*}; n=${r#*/}
+  case "$r" in */*/*|*/) refuse "--repo '$r' is not <owner/repo>";; */*) ;; *) refuse "--repo '$r' is not <owner/repo>";; esac
+  name_ok "$o" && name_ok "$n" || refuse "--repo '$r' does not match ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\$"
+else
+  url=$(git -C "$abs" remote get-url origin 2>/dev/null) || refuse "no --repo and no origin remote in $dir"
+  case "$url" in
+    https://github.com/ephremdeme/*) n=${url#https://github.com/ephremdeme/};;
+    ssh://git@github.com/ephremdeme/*) n=${url#ssh://git@github.com/ephremdeme/};;
+    git@github.com:ephremdeme/*) n=${url#git@github.com:ephremdeme/};;
+    *) refuse "origin '$url' is not a github.com URL of ephremdeme/<name>; pass --repo";;
+  esac
+  n=${n%.git}
+  name_ok "$n" || refuse "origin '$url' is not a github.com URL of ephremdeme/<name>; pass --repo"
+  r="ephremdeme/$n"
+fi
+if [ $log_set -eq 1 ]; then [ -f "$log" ] && [ -r "$log" ] || refuse "--log $log is not a readable file"; fi
+tmp=$(mktemp) || refuse "mktemp failed"
+trap 'rm -f "$tmp"' EXIT
+doc=$(mktemp) || refuse "mktemp failed"
+trap 'rm -f "$tmp" "$doc"' EXIT
+
+rows=0; nfail=0
+pass() { rows=$((rows + 1)); echo "close-check: PASS $1${2:+ $2}"; }
+fail() { rows=$((rows + 1)); nfail=$((nfail + 1))
+  d=$(printf '%s' "$2" | tr '\n\r' '  ' | cut -c1-200); echo "close-check: FAIL $1 — $d"; }
+g() { git -C "$abs" "$@"; }
+dec() { n=${1#"${1%%[!0]*}"}; echo "${n:-0}"; }   # strip leading zeros of a validated digit run
+# committed <rel>: the file as committed at HEAD into $doc (merge-pr reads it at the sha, never the working tree);
+# status 1 when it is not a blob there (missing, or a tree whose entry names could mimic the lines) or cannot be read.
+committed() { [ "$(g cat-file -t "$head:$1" 2>/dev/null)" = blob ] && g cat-file blob "$head:$1" > "$doc" 2>/dev/null; }
+
+# head
+if st=$(g status --porcelain --untracked-files=no --ignore-submodules=none 2>/dev/null); then
+  if [ -z "$st" ]; then pass head "$head"
+  else first=$(printf '%s\n' "$st" | head -n 1); fail head "tracked change: ${first#???}"; fi
+else fail head "git status failed"; fi
+
+# pr
+row_pr() {
+  j=$(gh pr view "$pr" --repo "$r" --json state,isDraft,headRefOid,isCrossRepository 2>/dev/null) \
+    || { fail pr "gh pr view $pr --repo $r failed"; return; }
+  [ -n "$j" ] || { fail pr "gh pr view returned nothing"; return; }
+  v=$(printf '%s' "$j" | jq -er 'if (.state|type)=="string" and (.isDraft|type)=="boolean"
+      and (.headRefOid|type)=="string" and (.isCrossRepository|type)=="boolean"
+      then "\(.state) \(.isDraft) \(.isCrossRepository) \(.headRefOid)" else error("fields") end' 2>/dev/null) \
+    || { fail pr "gh pr view reply lacks state, isDraft, headRefOid or isCrossRepository"; return; }
+  set -- $v
+  [ $# -eq 4 ] || { fail pr "unreadable gh pr view reply"; return; }
+  [ "$1" = OPEN ] || { fail pr "state $1, not OPEN"; return; }
+  [ "$2" = false ] || { fail pr "the PR is a draft"; return; }
+  [ "$3" = false ] || { fail pr "the PR is from another repository"; return; }
+  [ "$4" = "$head" ] || { fail pr "headRefOid $4 is not HEAD $head"; return; }
+  pass pr
+}
+row_pr
+
+# labels
+row_labels() {
+  j=$(gh pr view "$pr" --repo "$r" --json labels 2>/dev/null) || { fail labels "gh pr view $pr --repo $r failed"; return; }
+  [ -n "$j" ] || { fail labels "gh pr view returned nothing"; return; }
+  ls=$(printf '%s' "$j" | jq -r 'if (.labels|type)=="array" then (.labels[] | .name | strings) else error("labels") end' \
+    2>/dev/null) || { fail labels "gh pr view reply lacks labels"; return; }
+  miss=
+  for l in founder-approved human-gate-accepted; do
+    printf '%s\n' "$ls" | grep -Fqx -- "$l" || miss="$miss $l"
+  done
+  if [ -n "$miss" ]; then fail labels "missing:$miss"; else pass labels; fi
+}
+row_labels
+
+# codex
+row_codex() {
+  rel="docs/md-reports/$m-milestone-review.md"; f=$doc
+  committed "$rel" || { fail codex "$rel is not a file committed at HEAD"; return; }
+  ln=$(grep -- '^codex-last-read:' "$f"); [ $? -le 1 ] || { fail codex "$rel could not be read"; return; }
+  [ -n "$ln" ] || { fail codex "no codex-last-read line in $rel"; return; }
+  c=$(printf '%s\n' "$ln" | wc -l | tr -d ' ')
+  [ "$c" -eq 1 ] || { fail codex "$c codex-last-read lines in $rel, exactly one required"; return; }
+  x=${ln#codex-last-read: }
+  case "$x" in *[!0-9a-f]*|'') x=;; esac
+  [ "$ln" = "codex-last-read: $x" ] && [ ${#x} -eq 40 ] || { fail codex "not 'codex-last-read: <40 hex>': $ln"; return; }
+  [ "$x" = "$head" ] && { pass codex; return; }
+  g cat-file -e "$x^{commit}" 2>/dev/null || { fail codex "codex-last-read $x is not a commit here"; return; }
+  g merge-base --is-ancestor "$x" "$head" 2>/dev/null || { fail codex "codex-last-read $x is not an ancestor of HEAD"; return; }
+  ch=$(g diff --name-only --no-renames "$x" "$head" 2>/dev/null) || { fail codex "git diff $x HEAD failed"; return; }
+  other=$(printf '%s\n' "$ch" | grep -Fvx -e "$rel" -e '' | head -n 1)
+  [ -z "$other" ] || { fail codex "changed since codex-last-read $x: $other"; return; }
+  pass codex
+}
+row_codex
+
+# mutants
+row_mutants() {
+  rel="docs/md-reports/$m-mutants.md"; f=$doc
+  committed "$rel" || { fail mutants "$rel is not a file committed at HEAD"; return; }
+  last=$(grep -v -- '^$' "$f"); [ $? -le 1 ] || { fail mutants "$rel could not be read"; return; }
+  last=$(printf '%s\n' "$last" | tail -n 1)
+  [ "$last" = "open survivors: 0" ] || { fail mutants "last line is '$last', not 'open survivors: 0'"; return; }
+  grep -- '^run:' "$f" > "$tmp"; [ $? -le 1 ] || { fail mutants "$rel could not be read"; return; }
+  [ -s "$tmp" ] || { fail mutants "no run: line in $rel"; return; }   # at least one; every one well-formed (below)
+  re='^run: [0-9a-f]{7,40} files: .+ tested: [0-9]+ missed: [0-9]+ caught: [0-9]+ unviable: [0-9]+ timeout: [0-9]+$'
+  while IFS= read -r line; do
+    printf '%s\n' "$line" | grep -Eq -- "$re" || { fail mutants "malformed run line: $line"; return; }
+    sha=${line#run: }; sha=${sha%% *}
+    files=${line#* files: }; files=${files% tested: *}
+    nums=${line##* tested: }
+    set -- $(printf '%s' "$nums" | sed 's/[a-z]*: //g')
+    [ $# -eq 5 ] || { fail mutants "unreadable counts: $line"; return; }
+    # The digits are base 10 even with leading zeros (a leading 0 would read as octal in $(( ))).
+    t=$(dec "$1"); mi=$(dec "$2"); ca=$(dec "$3"); un=$(dec "$4"); to=$(dec "$5")
+    [ "$t" -eq $((mi + ca + un + to)) ] \
+      || { fail mutants "run $sha: tested $t is not missed + caught + unviable + timeout ($((mi + ca + un + to)))"; return; }
+    full=$(g rev-parse --verify -q "$sha^{commit}" 2>/dev/null) || { fail mutants "run $sha is not a commit here"; return; }
+    for p in $(printf '%s' "$files" | tr ',' ' '); do
+      case "$p" in */*) ;; *) fail mutants "run $sha: files: entry '$p' has no <crate>/ prefix"; return;; esac
+      crate=${p%%/*}
+      case "$crate" in ''|.|..|*[!A-Za-z0-9_.-]*) fail mutants "run $sha: bad files: entry '$p'"; return;; esac
+      # A pathspec in neither tree diffs clean (exit 0): the crate's src must exist at the run, or the check is vacuous.
+      g cat-file -e "$full:$crate/src" 2>/dev/null || { fail mutants "run $sha: $crate/src does not exist at the run"; return; }
+      g diff --quiet "$full" "$head" -- "$crate/src" 2>/dev/null; rc=$?
+      if [ $rc -eq 1 ]; then fail mutants "run $sha: $crate/src changed since the run"; return
+      elif [ $rc -ne 0 ]; then fail mutants "run $sha: git diff failed ($rc)"; return; fi
+    done
+  done < "$tmp"
+  pass mutants
+}
+row_mutants
+
+# report
+row_report() {
+  rel="docs/md-reports/$m.md"; f=$doc
+  committed "$rel" || { fail report "$rel is not a file committed at HEAD"; return; }
+  fc=$(grep -c -- '^full chain: ' "$f"); [ $? -le 1 ] || { fail report "$rel could not be read"; return; }
+  tk=$(grep -c -E -- '^Tokens: integrator avg_ctx=[0-9]+k calls_per_merge=[0-9]+; lanes avg_ctx=[0-9]+k requests=[0-9]+; codex reads=[0-9]+$' "$f")
+  [ $? -le 1 ] || { fail report "$rel could not be read"; return; }
+  miss=
+  [ "$fc" -ge 1 ] || miss="no 'full chain: ' line"
+  [ "$tk" -ge 1 ] || miss="${miss:+$miss; }no Tokens: line in the docs/07 §2 item 11 format"
+  if [ -n "$miss" ]; then fail report "$rel: $miss"; else pass report; fi
+}
+row_report
+
+# gate
+row_gate() {
+  out=$(sh "$here/gate-summary" "$log" --id "$m" 2>&1); rc=$?
+  lst=$(printf '%s\n' "$out" | tail -n 1)
+  if [ $rc -ne 0 ]; then
+    case "$lst" in "gate-summary: red — "*) d=${lst#gate-summary: red — };; *) d="gate-summary exit $rc: $lst";; esac
+    fail gate "$d"; return
+  fi
+  case "$lst" in "gate-summary: green $m "*) s=${lst#gate-summary: green $m };; *) fail gate "unexpected: $lst"; return;; esac
+  [ "$s" = "$head" ] || { fail gate "gate-head $s is not HEAD $head"; return; }
+  pass gate
+}
+[ $log_set -eq 0 ] || row_gate
+
+if [ $nfail -eq 0 ]; then echo "close-check: OK ($rows rows)"; exit 0; fi
+echo "close-check: FAILED ($nfail of $rows rows)"; exit 1

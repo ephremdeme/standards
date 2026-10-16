@@ -72,7 +72,7 @@ reset_stub; touch "$STUB/no-outcomes"
 want "control: missing outcome files -> exit 1" 1 '^mutants: no outcome files in .*/diff/mutants\.out \(cargo mutants did not finish\)$' sh "$M" "$C" "$BASE" smoke
 reset_stub; echo 4 > "$STUB/mutants.rc"
 want "control: cargo mutants rc outside {0,2,3} -> exit 1" 1 '^mutants: cargo mutants failed \(rc=4\) in the diff batch$' sh "$M" "$C" "$BASE" smoke
-reset_stub; mkdir "$T/build.lock.d"; printf 'token=x\npid=999999999\nwho=other-session\nsince=2026-10-03T10:00:00Z\ncwd=/x\n' > "$T/build.lock.d/owner"
+reset_stub; mkdir "$T/build.lock.d"; printf 'token=x\npid=999999999\nwho=other-session\nsince=%s\ncwd=/x\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$T/build.lock.d/owner"
 want "control: a foreign build lock with BUILD_LOCK_WAIT=0 -> exit 3" 3 '^mutants: refused — the machine build lock is held by other-session' env BUILD_LOCK_WAIT=0 sh "$M" "$C" "$BASE" smoke
 check_ "control: ... nothing ran under the foreign lock" '[ ! -s "$STUB/cargo.log" ]'
 rm -f "$T/build.lock.d/owner"; rmdir "$T/build.lock.d"

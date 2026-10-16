@@ -1,7 +1,8 @@
 # Sourced POSIX library (C5, founder 2026-10-03; docs/07 §2 item 10 "Builds"): one Rust build at a time per machine,
 # one shared CARGO_TARGET_DIR per repo across worktrees, sccache when installed.
 #   BUILD_LOCK_WHO=<name>; . standards/bin/build-lock.sh
-#   build_lock_acquire || ...   # 0 acquired or re-entered; 1 error; 2 bad BUILD_LOCK_WAIT; 3 held after the wait
+#   build_lock_acquire || ...   # 0 acquired or re-entered; 1 error; 2 bad BUILD_LOCK_WAIT or BUILD_LOCK_STALE;
+#                               # 3 held after the wait
 #   build_lock_env || ...       # shared target, switch clean, sccache (1 = the clean failed: nothing may build)
 #   build_lock_release          # also runs on EXIT/INT/TERM/HUP of the acquirer (a caller that sets its own EXIT
 #                               # trap afterwards must call build_lock_release in it)
@@ -9,8 +10,20 @@
 # (token=, pid=, who=, since=, cwd=). The acquirer exports BUILD_LOCK_TOKEN; a child whose BUILD_LOCK_TOKEN equals the
 # owner's token re-enters without acquiring or releasing (a check inside a verify chain or a dispatch judgement). A
 # foreign lock is waited for up to BUILD_LOCK_WAIT seconds (default 1800, polled every 10 s), then refused naming the
-# holder. A lock is never stolen, reused or deleted by anyone but its acquirer; a stale one (holder gone) is named and
-# removed by hand only. Sessions never export their own TMPDIR (docs/07 §4), or the lock would not be machine-wide.
+# holder. A lock is never stolen, reused or deleted by anyone but its acquirer, with one exception, the stale rule
+# (exchange BACKLOG 56: a harness crash left the lock behind overnight): a waiter takes a foreign lock, before the wait
+# budget is judged on each poll, only when ALL of these hold: BUILD_LOCK_STALE (seconds, default 900, a whole number of
+# at most 7 digits, else return 2; 0 disables the rule) is not 0; the owner's pid= is numeric without a leading zero;
+# /proc/1 is a directory (Linux) and /proc/<pid> is not; since= has the owner file's own form YYYY-MM-DDTHH:MM:SSZ and
+# `date -u -d` parses it; now - since >= BUILD_LOCK_STALE; the owner file has a token=. Anything else is held, as
+# before. Taking it renames the OWNER FILE to owner.stale.<pid> inside the lock (one waiter wins; the lock path is
+# never vacated, so no third acquirer can mkdir it mid-take), re-reads the token there (a different token = a fresh
+# owner moved in a race: moved back; if that fails it stays aside and the lock reads as held by unknown), removes it
+# and rmdirs the lock (a failure = held), prints "build-lock: took the stale lock of <who> (pid <pid>, since <since>):
+# the holder is gone and the lock is older than <n>s" on stderr and retries mkdir at once (another waiter may win it:
+# then it is held). Residual: a holder in
+# another pid namespace, or a build whose acquiring shell died while its cargo children run on, looks gone.
+# Sessions never export their own TMPDIR (docs/07 §4), or the lock would not be machine-wide.
 # Shared target: <primary checkout>/target/shared. Cargo keys workspace crates by their path relative to the workspace
 # root and trusts mtimes, so before a different worktree builds there, every workspace member is cleaned
 # (`cargo clean -p`), dependencies stay cached; the stamp target/shared/.standards-worktree names the last builder.
@@ -23,6 +36,10 @@ build_lock_acquire() {
   case "$_bl_wait" in ''|*[!0-9]*) echo "build-lock: BUILD_LOCK_WAIT must be a whole number of seconds" >&2; return 2;; esac
   [ ${#_bl_wait} -le 6 ] || { echo "build-lock: BUILD_LOCK_WAIT must be a whole number of seconds" >&2; return 2; }
   _bl_wait=$(printf '%s' "$_bl_wait" | sed 's/^0*//'); [ -n "$_bl_wait" ] || _bl_wait=0
+  _bl_stale=${BUILD_LOCK_STALE-900}
+  case "$_bl_stale" in ''|*[!0-9]*) echo "build-lock: BUILD_LOCK_STALE must be a whole number of seconds" >&2; return 2;; esac
+  [ ${#_bl_stale} -le 7 ] || { echo "build-lock: BUILD_LOCK_STALE must be a whole number of seconds" >&2; return 2; }
+  _bl_stale=$(printf '%s' "$_bl_stale" | sed 's/^0*//'); [ -n "$_bl_stale" ] || _bl_stale=0
   _bl_waited=0; _bl_said=0
   while :; do
     if mkdir "$_bl_dir" 2>/dev/null; then
@@ -50,12 +67,29 @@ build_lock_acquire() {
     BUILD_LOCK_HOLDER_SINCE=$(sed -n 's/^since=//p' "$_bl_dir/owner" 2>/dev/null | head -n 1); : "${BUILD_LOCK_HOLDER_SINCE:=unknown}"
     BUILD_LOCK_HOLDER_CWD=$(sed -n 's/^cwd=//p' "$_bl_dir/owner" 2>/dev/null | head -n 1); : "${BUILD_LOCK_HOLDER_CWD:=unknown}"
     BUILD_LOCK_WAITED=$_bl_waited
+    # The stale rule. The OWNER FILE is renamed aside (one waiter wins the rename), never the directory, so the lock path
+    # is never vacant and no third acquirer can mkdir it mid-take. Its token re-read there must be the one judged stale;
+    # then it is removed and the directory rmdir'ed (a failure = held) and mkdir retried in this iteration. A different
+    # token (a fresh owner moved in a race) is moved back (a failure leaves it aside: the lock then reads as held by
+    # unknown). Every path but the retry falls through to the wait below, so the loop never spins without sleeping.
+    _bl_aside="$_bl_dir/owner.stale.$$"
+    if _bl_is_stale && mv "$_bl_dir/owner" "$_bl_aside" 2>/dev/null; then
+      if [ "$(sed -n 's/^token=//p' "$_bl_aside" 2>/dev/null | head -n 1)" = "$_bl_otok" ]; then
+        rm -f "$_bl_aside"
+        if rmdir "$_bl_dir" 2>/dev/null; then
+          echo "build-lock: took the stale lock of $BUILD_LOCK_HOLDER_WHO (pid $BUILD_LOCK_HOLDER_PID, since $BUILD_LOCK_HOLDER_SINCE): the holder is gone and the lock is older than ${_bl_stale}s" >&2
+          continue
+        fi
+      else
+        mv "$_bl_aside" "$_bl_dir/owner" 2>/dev/null || :
+      fi
+    fi
     [ "$_bl_waited" -lt "$_bl_wait" ] || return 3
     if [ $_bl_said -eq 0 ]; then
       echo "$_bl_who: waiting for the build lock held by $BUILD_LOCK_HOLDER_WHO (pid $BUILD_LOCK_HOLDER_PID, since $BUILD_LOCK_HOLDER_SINCE)" >&2
       case "$BUILD_LOCK_HOLDER_PID" in *[!0-9]*|'') ;; *)
         if [ -d /proc/1 ] && [ ! -d "/proc/$BUILD_LOCK_HOLDER_PID" ]; then
-          echo "build-lock: pid $BUILD_LOCK_HOLDER_PID is not running — the lock is possibly stale; it is never removed automatically (by hand: rm $_bl_dir/owner && rmdir $_bl_dir)" >&2
+          echo "build-lock: pid $BUILD_LOCK_HOLDER_PID is not running — the lock is possibly stale; $(_bl_rule) (its owner file renamed aside, never the directory); by hand: rm -f $_bl_dir/owner $_bl_dir/owner.stale.* && rmdir $_bl_dir" >&2
         fi;;
       esac
       _bl_said=1
@@ -65,9 +99,28 @@ build_lock_acquire() {
   done
 }
 
+# The stale rule's conditions on the owner just read (all of them; anything else = held).
+_bl_is_stale() {
+  [ "$_bl_stale" -ne 0 ] && [ -n "$_bl_otok" ] || return 1
+  case "$BUILD_LOCK_HOLDER_PID" in ''|0*|*[!0-9]*) return 1;; esac
+  [ -d /proc/1 ] && [ ! -d "/proc/$BUILD_LOCK_HOLDER_PID" ] || return 1
+  case "$BUILD_LOCK_HOLDER_SINCE" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) ;; *) return 1;; esac
+  _bl_s=$(date -u -d "$BUILD_LOCK_HOLDER_SINCE" +%s 2>/dev/null) || return 1
+  _bl_n=$(date -u +%s 2>/dev/null) || return 1
+  case "$_bl_s$_bl_n" in ''|*[!0-9]*) return 1;; esac
+  [ $((_bl_n - _bl_s)) -ge "$_bl_stale" ]
+}
+
+# The rule, named in the hints.
+_bl_rule() {
+  if [ "$_bl_stale" -eq 0 ]; then echo "the stale rule is off (BUILD_LOCK_STALE=0)"
+  else echo "it is taken automatically once older than BUILD_LOCK_STALE=${_bl_stale}s"; fi
+}
+
 # The refusal after the wait (exit 3 in with-build-lock, verify-lib.sh and mutants).
 build_lock_refusal() {
-  echo "$_bl_who: refused — the machine build lock is held by $BUILD_LOCK_HOLDER_WHO (pid $BUILD_LOCK_HOLDER_PID, since $BUILD_LOCK_HOLDER_SINCE, cwd $BUILD_LOCK_HOLDER_CWD) after waiting ${BUILD_LOCK_WAITED}s; stale? check pid $BUILD_LOCK_HOLDER_PID, then rm $_bl_dir/owner && rmdir $_bl_dir" >&2
+  echo "$_bl_who: refused — the machine build lock is held by $BUILD_LOCK_HOLDER_WHO (pid $BUILD_LOCK_HOLDER_PID, since $BUILD_LOCK_HOLDER_SINCE, cwd $BUILD_LOCK_HOLDER_CWD) after waiting ${BUILD_LOCK_WAITED}s; stale? check pid $BUILD_LOCK_HOLDER_PID, then rm $_bl_dir/owner && rmdir $_bl_dir (a lock whose holder is gone: $(_bl_rule))" >&2
 }
 
 # Releases only a lock this process acquired, and only while the owner file still carries its token.
