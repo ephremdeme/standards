@@ -6,12 +6,25 @@
 # Web tools disabled: lanes need none, and DeepSeek web search adds token cost and injection surface.
 # DeepSeek settings exist ONLY in this process. HIGH lanes are refused unless DISPATCH_ALLOW_HIGH is exactly 1
 # (founder decision D-073, 2026-10-02: an Opus-written TASK/contract, Opus review mandatory). Absolute refusals, with
-# or without that variable: repos marked .no-deepseek, and a TASK whose §3 owns an admin surface (m1.1 O2).
+# or without that variable: repos marked .no-deepseek (except the lanes a committed .deepseek-lanes names, below), and
+# a TASK whose §3 owns an admin surface (m1.1 O2).
+# Exchange D-161 (lane-scoped override): `.deepseek-lanes` lines are `<branch> D-<digits>` (one space, the branch in
+# task-lint's grammar, no trailing space, no CR; empty and `#` lines ignored). It is read ONLY from the TASK's Base
+# commit (never the worktree, the lane HEAD or the primary checkout) and validated whole before use: a malformed line
+# or a branch listed twice refuses every lane of a .no-deepseek repo, listed or not. The TASK's Branch: must equal a
+# listed branch exactly (no regex, no prefix), and Base must be an ancestor of a branch head that `git ls-remote origin`
+# reports (a lane cannot push, so it cannot move Base to a listing of its own; a hand-made refs/remotes/ ref proves
+# nothing). The lane worktree shares .git with the primary, so replace objects are off (GIT_NO_REPLACE_OBJECTS=1) and
+# a refs/replace/ ref, an info/grafts file or a shallow file refuses the override. The override line names branch,
+# Base and decision. Every other refusal still applies to an overridden lane. A case that cannot be an override keeps
+# the old refusal, first. The listing is read at the lane's Base: revoking a lane means removing its line AND
+# re-cutting (or pruning) its worktree.
 # Refusals before dispatch exit 2. After the run the lane is judged on bytes and by judges it could not touch: it must
 # have added commits on its branch, left a clean tree (git errors and hidden index edits fail closed), changed nothing
-# under scripts/verify/, standards or .gitmodules, and then pass `check` and the instrument section named in TASK §5,
-# both read BEFORE the run (the instrument script is taken from the pre-run commit). Otherwise exit 1 naming the
-# reason (retro review 14 and its fix round).
+# under scripts/verify/, standards, .gitmodules, .deepseek-lanes or .no-deepseek (both sides of a rename), and then
+# pass `check` and the instrument section named in TASK §5 (`scripts/verify/<id>.sh --section <name>`, <id> in
+# local-gate's grammar [a-z][a-z0-9_]*), both read BEFORE the run (the instrument script is taken from the pre-run
+# commit). Otherwise exit 1 naming the reason (retro review 14 and its fix round).
 # C7 (founder 2026-10-03): this script's own copy of task-lint runs right after the Risk check (header, branch, base,
 # the owned-paths block, sections, clean tree, submodule pointer, 15 GB free disk); ownership — and with it the admin
 # refusal (NOTES-19 defect 2) — is read from the TASK's owned-paths block only (bin/owned-paths). C6: the post-run check
@@ -29,6 +42,8 @@
 # from the lane's commit. No build lock (nothing is built); logs go to the worktree's git dir.
 # Every repo: a dispatcher that lies inside the lane worktree (the lane's own copy) is refused; run the primary's.
 set -eu
+# Every object is read as committed (as push-branch, close-check and merge-pr do): no replace refs.
+GIT_NO_REPLACE_OBJECTS=1; export GIT_NO_REPLACE_OBJECTS
 here=$(cd "$(dirname "$0")" && pwd -P)
 wt=${1:?absolute worktree path}; effort=${2:-max}
 case "$effort" in max|high) ;; *) echo "dispatch-deepseek: effort must be max or high, not '$effort'" >&2; exit 2;; esac
@@ -43,8 +58,56 @@ case "$here/" in "$top_p"/*)
 root=$(cd "$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)/.." && pwd -P)
 # .no-deepseek is judged on the PRIMARY checkout's committed tree (and the lane's), not only on the lane's files:
 # deleting or replacing the marker inside a lane changes nothing (retro review 12).
+# Exchange D-161: the TASK's Base may carry a `.deepseek-lanes` naming this lane (see the header). Here only what can
+# be read without a linted TASK is decided; anything that cannot be an override is the old refusal. The rest (Base an
+# ancestor of HEAD, Base on a branch of origin) is decided after task-lint.
+ovr_branch=""; ovr_base=""; ovr_dec=""
 if [ -e "$top/.no-deepseek" ] || git -C "$root" cat-file -e HEAD:.no-deepseek 2>/dev/null || git -C "$wt" cat-file -e HEAD:.no-deepseek 2>/dev/null; then
-  echo "dispatch-deepseek: refused — this repo never sends code to DeepSeek" >&2; exit 2; fi
+  nods() { echo "dispatch-deepseek: refused — this repo never sends code to DeepSeek" >&2; exit 2; }
+  [ -f "$wt/TASK.md" ] || nods
+  ob=$(sed -n 1p "$wt/TASK.md") && ov=$(sed -n 2p "$wt/TASK.md") || nods
+  case "$ob" in "Branch: "?*) ob=${ob#Branch: };; *) nods;; esac
+  case "$ov" in "Base: "?*) ov=${ov#Base: };; *) nods;; esac
+  case "$ov" in *[!0-9a-f]*) nods;; esac
+  [ "${#ov}" -eq 40 ] || nods
+  git -C "$wt" cat-file -e "$ov^{commit}" 2>/dev/null || nods
+  dl_type=$(git -C "$wt" cat-file -t "$ov:.deepseek-lanes" 2>/dev/null) || nods
+  # Object substitution through the shared .git: replace refs (also off above), grafts and a shallow boundary each
+  # refuse the override, before the listing is read.
+  gcd=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir) && [ -n "$gcd" ] \
+    || { echo "dispatch-deepseek: refused — git rev-parse --git-common-dir failed in $wt" >&2; exit 2; }
+  reps=$(git -C "$wt" for-each-ref refs/replace/) || { echo "dispatch-deepseek: refused — git for-each-ref refs/replace/ failed in $wt" >&2; exit 2; }
+  [ -z "$reps" ] || { echo "dispatch-deepseek: refused — refs/replace/ holds a ref (git replace): .deepseek-lanes and Base cannot be read as committed" >&2; exit 2; }
+  [ ! -e "$gcd/info/grafts" ] && [ ! -L "$gcd/info/grafts" ] \
+    || { echo "dispatch-deepseek: refused — $gcd/info/grafts exists: grafts rewrite the history Base is judged on" >&2; exit 2; }
+  [ ! -e "$gcd/shallow" ] && [ ! -L "$gcd/shallow" ] \
+    || { echo "dispatch-deepseek: refused — $gcd/shallow exists: a shallow repository cannot prove where Base lies" >&2; exit 2; }
+  dl_bad() { echo "dispatch-deepseek: refused — cannot read .deepseek-lanes at Base $ov ($1)" >&2; exit 2; }
+  [ "$dl_type" = blob ] || dl_bad "a $dl_type, not a file"
+  # Bytes, not a shell variable: a NUL becomes \001 (then never valid) instead of vanishing.
+  dl_dir=$(mktemp -d) || dl_bad "mktemp failed"
+  { git -C "$wt" cat-file blob "$ov:.deepseek-lanes" > "$dl_dir/raw" && tr '\000' '\001' < "$dl_dir/raw" > "$dl_dir/lanes"; } \
+    || { rm -rf "$dl_dir"; dl_bad "git cat-file failed"; }
+  # The whole file first: `ok <branch> <decision>` per entry, or a last line `bad <n>` / `dup <branch>`.
+  dlv=$(LC_ALL=C awk '/^$/ || /^#/ { next }
+    !/^[A-Za-z0-9]+\/[A-Za-z0-9][A-Za-z0-9_.-]* D-[0-9]+$/ { print "bad " NR; exit }
+    { sp = index($0, " "); b = substr($0, 1, sp - 1); if (b in seen) { print "dup " b; exit } seen[b] = 1; print "ok " $0 }' "$dl_dir/lanes") \
+    || { rm -rf "$dl_dir"; dl_bad "awk failed"; }
+  rm -rf "$dl_dir"
+  dl_last=$(printf '%s\n' "$dlv" | tail -n 1)
+  case "$dl_last" in
+    "bad "*) echo "dispatch-deepseek: refused — .deepseek-lanes line ${dl_last#bad } is not '<branch> D-<number>'" >&2; exit 2;;
+    "dup "*) echo "dispatch-deepseek: refused — .deepseek-lanes lists ${dl_last#dup } more than once" >&2; exit 2;;
+  esac
+  # Exact string equality with the TASK's Branch: (never a regex or a prefix).
+  while IFS=' ' read -r dl_tag dl_b dl_d; do
+    if [ "$dl_tag" = ok ] && [ "$dl_b" = "$ob" ]; then ovr_dec=$dl_d; fi
+  done <<EOF
+$dlv
+EOF
+  [ -n "$ovr_dec" ] || nods
+  ovr_branch=$ob; ovr_base=$ov
+fi
 # Risk comes from the TASK header only: lines 1-3 hold exactly one `Risk: ` line, it reads `Risk: LOW` (or exactly
 # `Risk: HIGH` with DISPATCH_ALLOW_HIGH=1, D-073), and no other line of the TASK starts with `Risk: ` (a `Risk: LOW`
 # further down a HIGH TASK never counts; retro review 12).
@@ -107,6 +170,26 @@ fi
 kind=$(sh "$here/owned-paths" --kind "$task") || { echo "dispatch-deepseek: refused — the owned-paths block of TASK §3 is unreadable" >&2; exit 2; }
 branch=$(sed -n 's/^Branch: //p' "$task")
 [ "$(git -C "$wt" branch --show-current)" = "$branch" ] || { echo "dispatch-deepseek: branch mismatch" >&2; exit 2; }
+# Exchange D-161, after task-lint (Base a full sha and an ancestor of HEAD, Branch: the worktree's branch): the
+# override holds only for the linted branch and Base, and only when Base is an ancestor of a branch head of origin as
+# origin reports it now (ls-remote; local refs/remotes/ can be made by hand). A head not present locally, or not a
+# 40-hex sha, does not contain Base.
+if [ -n "$ovr_dec" ]; then
+  { [ "$branch" = "$ovr_branch" ] && [ "$(sed -n 's/^Base: //p' "$task")" = "$ovr_base" ] \
+    && git -C "$wt" merge-base --is-ancestor "$ovr_base" HEAD 2>/dev/null; } \
+    || { echo "dispatch-deepseek: refused — this repo never sends code to DeepSeek" >&2; exit 2; }
+  heads=$(git -C "$wt" ls-remote origin 'refs/heads/*' 2>/dev/null) \
+    || { echo "dispatch-deepseek: refused — git ls-remote origin failed, so Base cannot be placed on a branch of origin" >&2; exit 2; }
+  [ -n "$heads" ] || { echo "dispatch-deepseek: refused — git ls-remote origin lists no branch, so Base cannot be placed on a branch of origin" >&2; exit 2; }
+  contained=0
+  for h in $(printf '%s\n' "$heads" | awk '{ print $1 }'); do
+    case "$h" in *[!0-9a-f]*) continue;; esac
+    [ "${#h}" -eq 40 ] || continue
+    git -C "$wt" cat-file -e "$h^{commit}" 2>/dev/null || continue
+    if git -C "$wt" merge-base --is-ancestor "$ovr_base" "$h" 2>/dev/null; then contained=1; break; fi
+  done
+  [ "$contained" = 1 ] || { echo "dispatch-deepseek: refused — .deepseek-lanes is read from Base $ovr_base, which no branch of origin contains" >&2; exit 2; }
+fi
 # Headless `claude -p` never shows the trust dialog and ignores a project's permission allow rules until the
 # REPOSITORY ROOT (the primary checkout — a lane worktree inherits it) was trusted once interactively. Fail fast with
 # the remedy instead of running a lane whose every tool call is auto-denied and whose untouched worktree would then
@@ -126,8 +209,8 @@ if [ "$std" = 1 ]; then
   done
   jlist=""; for j in $sjudges; do jlist="${jlist}sh $j, "; done
 else
-inst=$(awk '/^## /{ s = ($0 ~ /^## 5\./) } s' "$task" | sed -n 's/.*\(scripts\/verify\/m[0-9_]*\.sh\) --section \([a-z0-9_-][a-z0-9_-]*\).*/\1 \2/p' | head -n 1)
-[ -n "$inst" ] || { echo "dispatch-deepseek: refused — TASK §5 names no instrument section (scripts/verify/mN.sh --section <name>, N a number)" >&2; exit 2; }
+inst=$(awk '/^## /{ s = ($0 ~ /^## 5\./) } s' "$task" | LC_ALL=C sed -n 's/.*\(scripts\/verify\/[a-z][a-z0-9_]*\.sh\) --section \([a-z0-9_-][a-z0-9_-]*\).*/\1 \2/p' | head -n 1)
+[ -n "$inst" ] || { echo "dispatch-deepseek: refused — TASK §5 names no instrument section (scripts/verify/<id>.sh --section <name>, <id> as local-gate's: [a-z][a-z0-9_]*)" >&2; exit 2; }
 script=${inst% *}; section=${inst#* }
 fi
 # Retro review 13: nothing of the caller's environment reaches claude, check or the instrument except this allowlist
@@ -148,8 +231,10 @@ ds_env() { base_env \
   CLAUDE_CODE_AUTO_COMPACT_WINDOW=786432 \
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
   "$@"; }
-# A HIGH lane says under which decision it goes, only once nothing can stop it any more (after the brief is read).
-d073() { [ "$high" = 0 ] || echo "dispatch-deepseek: HIGH lane sent to DeepSeek under founder decision D-073 (Opus contract + Opus review mandatory)" >&2; }
+# A HIGH lane and an overridden .no-deepseek lane say under which decision they go, only once nothing can stop them any
+# more (after the brief is read; in the dry run before its summary).
+d073() { [ "$high" = 0 ] || echo "dispatch-deepseek: HIGH lane sent to DeepSeek under founder decision D-073 (Opus contract + Opus review mandatory)" >&2
+  [ -z "$ovr_dec" ] || echo "dispatch-deepseek: .no-deepseek overridden for $ovr_branch by .deepseek-lanes at $ovr_base (decision $ovr_dec)" >&2; }
 # Smoke hook: every refusal above has run; stop before anything leaves the machine. Lists the NAMES of the variables
 # claude would receive (the real environment of the real wrapper, never the values).
 if [ "${DISPATCH_DRY_RUN:-0}" = 1 ]; then
@@ -251,9 +336,10 @@ EOF
   echo "dispatch-deepseek: OK — new commit $after, clean tree, every changed path in the docs allow-list, ${jdone}tests/docs.t.sh --judge green"
   exit 0
 fi
-# The lane may not touch what judges it: the instruments, the pinned standards (check, verify-lib) or the submodule map.
-touched=$(git diff --name-only "$before" "$after") || fail "no commit (git diff $before $after failed)"
-judges=$(printf '%s\n' "$touched" | grep -E -e '^scripts/verify/' -e '^standards(/|$)' -e '^\.gitmodules$' || true)
+# The lane may not touch what judges it: the instruments, the pinned standards (check, verify-lib), the submodule map,
+# or the DeepSeek policy files `.deepseek-lanes` and `.no-deepseek` (exchange D-161); both sides of a rename.
+touched=$(git diff --no-renames --name-only "$before" "$after") || fail "no commit (git diff $before $after failed)"
+judges=$(printf '%s\n' "$touched" | grep -E -e '^scripts/verify/' -e '^standards(/|$)' -e '^\.gitmodules$' -e '^\.deepseek-lanes$' -e '^\.no-deepseek$' || true)
 judges=$judges$(printf '%s\n' "$touched" | grep -Fx -e "$script" || true)
 [ -z "$judges" ] || { printf '%s\n' "$judges" | head -n 10 >&2; fail "lane changed its own judge"; }
 # C5: the judgement (check + instrument) holds the machine build lock; the judges re-enter it through BUILD_LOCK_TOKEN,
