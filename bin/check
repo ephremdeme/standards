@@ -66,21 +66,39 @@ else echo "SKIP  frontend (no web/package.json)"; fi
 # before it (tracked changes, then every untracked file under an `untracked <path>` header, which also carries the
 # untracked list, plus `git status --porcelain`) is compared with one taken after, so a lane's own uncommitted work
 # counts only where gen changed it. Every producer's exit status is checked: a failed snapshot is a FAIL, never a pass.
+# The diff ignores the product's diff config (--no-ext-diff --no-textconv), so a driver cannot mask a change. Gitignored
+# generated files are outside the check. The Makefile's gen, lint and test targets must be .PHONY: a file or directory
+# of the same name makes make skip the recipe.
+go_git() { git -c core.quotePath=false "$@"; }
 go_snap() { # go_snap <file>
-  git diff HEAD --binary > "$1" && git ls-files -z --others --exclude-standard > "$1.z" &&
+  go_git diff HEAD --binary --no-ext-diff --no-textconv --no-renames > "$1" &&
+    go_git ls-files -z --others --exclude-standard > "$1.z" &&
     xargs -0 sh -c 'for f do printf "untracked %s\n" "$f"; cat -- "$f" || exit 1; done' sh < "$1.z" >> "$1" &&
-    git status --porcelain > "$1.st"
+    go_git status --porcelain > "$1.st"
 }
 go_committed() {
   d=$go_snap_dir
-  if [ "$go_snap_rc" -ne 0 ] || ! go_snap "$d/after"; then echo "could not snapshot the working tree"; return 1; fi
+  if [ "$go_snap_rc" -ne 0 ] || ! go_snap "$d/after"; then
+    [ -z "$d" ] || cat "$d/before.err" 2>/dev/null; echo "could not snapshot the working tree"; return 1
+  fi
   cmp -s "$d/before" "$d/after" && cmp -s "$d/before.st" "$d/after.st" && return 0
-  echo "make gen changed the working tree; commit the generated code. Changed:"
-  diff "$d/before.st" "$d/after.st" | grep '^[<>]' | sed 's/^</before:/; s/^>/after: /'
-  # The chunks (one per `diff --git` or `untracked` header) that differ: names a path whose status line is unchanged.
-  awk 'FNR == 1 { k = "" } FILENAME == ARGV[1] { s = "a" } FILENAME == ARGV[2] { s = "b" }
-    /^diff --git / || /^untracked / { k = $0 } { c[s, k] = c[s, k] $0 "\n"; seen[k] = 1 }
-    END { for (k in seen) if (c["a", k] != c["b", k]) print "content: " k }' "$d/before" "$d/after"
+  diff "$d/before.st" "$d/after.st" | grep '^[<>]' > "$d/st.diff"
+  # The changed paths, sorted and unique: status lines that differ, plus every chunk (one per `diff --git` or
+  # `untracked` header) whose bytes differ, which names a path whose status line is unchanged. They come first and
+  # the whole message stays within step's 15-line tail.
+  { sed 's/^[<>] ...//' "$d/st.diff"
+    awk 'FNR == 1 { k = "" } FILENAME == ARGV[1] { s = "a" } FILENAME == ARGV[2] { s = "b" }
+      /^diff --git / || /^untracked / { k = $0 } { c[s, k] = c[s, k] $0 "\n"; seen[k] = 1 }
+      END { for (k in seen) if (k != "" && c["a", k] != c["b", k]) {
+        if (k ~ /^untracked /) print substr(k, 11)
+        else { p = substr(k, 12); print substr(p, 3, (length(p) - 5) / 2) } } }' "$d/before" "$d/after"
+  } | sort -u > "$d/paths"
+  n=$(wc -l < "$d/paths")
+  echo "make gen changed the working tree; commit the generated code:"
+  [ "$n" -gt 0 ] || { echo "changed: (no path named; the snapshots differ)"; n=1; }
+  awk 'NR <= 10 { print "changed: " $0 } END { if (NR > 10) print "… and " NR - 10 " more" }' "$d/paths"
+  [ "$n" -gt 10 ] && n=11
+  sed 's/^</before:/; s/^>/after: /' "$d/st.diff" | head -n $((13 - n))
   return 1
 }
 if [ "$only" = rust ] || [ "$only" = web ]; then echo "SKIP  go (--only $only)"
@@ -88,7 +106,7 @@ elif [ -f go.mod ]; then
   go_ok=1; need go "go" || go_ok=0; need make "go" || go_ok=0
   if [ $go_ok -eq 1 ] && [ ! -f Makefile ]; then echo "BLOCKED go (no Makefile with gen, lint and test targets)"; fail=1
   elif [ $go_ok -eq 1 ]; then
-    go_snap_rc=1; go_snap_dir=$(mktemp -d) && { go_snap "$go_snap_dir/before"; go_snap_rc=$?; }
+    go_snap_rc=1; go_snap_dir=$(mktemp -d) && { go_snap "$go_snap_dir/before" 2> "$go_snap_dir/before.err"; go_snap_rc=$?; }
     step "go generate (make gen)" make gen
     step "generated code committed (make gen changed nothing)" go_committed
     step "go lint (make lint)" make lint
