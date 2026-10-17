@@ -103,8 +103,14 @@ lane "$P" ds/selfedit "$IX"; commit_lanes 'ds/listed D-161\nds/selfedit D-161\n'
 expect "(f2) control: the lane edits Base's .deepseek-lanes to list itself -> refused" 2 "$NEVER"
 # (g) Base moved to a commit only the lane has: no remote-tracking ref contains it.
 lane "$P" ds/movebase "$MAIN"; commit_lanes 'ds/movebase D-161\n'; HB=$(git -C "$W" rev-parse HEAD); mktask ds/movebase "$HB" LOW "$M0"; run
-expect "(g) control: Base on no remote-tracking ref -> its own message" 2 \
-  "^dispatch-deepseek: refused — \\.deepseek-lanes is read from Base $HB, which no remote-tracking branch contains\$"
+expect "(g) control: Base on no branch of origin -> its own message" 2 \
+  "^dispatch-deepseek: refused — \\.deepseek-lanes is read from Base $HB, which no branch of origin contains\$"
+# (g2) a hand-made remote-tracking ref (update-ref) proves nothing: origin itself is asked (ls-remote).
+lane "$P" ds/forged "$MAIN"; commit_lanes 'ds/forged D-161\n'; HB=$(git -C "$W" rev-parse HEAD); mktask ds/forged "$HB" LOW "$M0"
+git -C "$P" update-ref refs/remotes/origin/x "$HB" || die "update-ref"; run
+expect "(g2) control: Base reachable only from a hand-made refs/remotes/origin/x -> refused" 2 \
+  "^dispatch-deepseek: refused — \\.deepseek-lanes is read from Base $HB, which no branch of origin contains\$"
+git -C "$P" update-ref -d refs/remotes/origin/x || die "update-ref -d"
 # (h) exact match only: prefix, suffix, extension and regex lookalikes stay refused; the listed names themselves pass.
 for b in ds/g2-life ds/g2xlifecycle s/g2-lifecycle ds/g2-lifecycle-x; do
   lane "$P" "$b" "$IX"; mktask "$b" "$IX" LOW "$M0"; run
@@ -144,6 +150,35 @@ expect "(p3) control: listed lane whose Base: is not a full sha -> never sends c
 mv "$W/TASK.md" "$T/TASK.keep"; run
 expect "(p4) control: no TASK.md -> never sends code to DeepSeek" 2 "$NEVER"
 mv "$T/TASK.keep" "$W/TASK.md"
+SHORT=${IX%????????????????????????????}; mktask ds/listed "$SHORT" LOW "$M0"; run
+expect "(p5) control: listed lane whose Base: is a 12-character abbreviation of the listing commit -> never sends code to DeepSeek" 2 "$NEVER"
+
+# (q) object substitution: the shared .git could replace Base's listing or rewrite its history.
+GCD=$(git -C "$P" rev-parse --path-format=absolute --git-common-dir) || die "git-common-dir"
+lane "$P" ds/replaced "$IX"; mktask ds/replaced "$IX" LOW "$M0"
+printf 'ds/replaced D-161\n' > "$T/rep.txt"; RB=$(git -C "$P" hash-object -w "$T/rep.txt") && OB=$(git -C "$P" rev-parse "$IX:.deepseek-lanes") \
+  && git -C "$P" replace "$OB" "$RB" || die "git replace"; run
+expect "(q) control: a git replace of Base's .deepseek-lanes blob listing an unlisted lane -> refused" 2 \
+  '^dispatch-deepseek: refused — refs/replace/ holds a ref \(git replace\): \.deepseek-lanes and Base cannot be read as committed$'
+git -C "$P" replace -d "$OB" >/dev/null || die "git replace -d"
+lane "$P" ds/grafted "$MAIN"; commit_lanes 'ds/grafted D-161\n'; HB=$(git -C "$W" rev-parse HEAD); mktask ds/grafted "$HB" LOW "$M0"
+printf '%s %s %s\n' "$IX" "$(git -C "$P" rev-parse "$IX^")" "$HB" > "$GCD/info/grafts" || die "grafts"; run
+expect "(q2) control: an info/grafts entry making an unpushed Base look contained -> refused" 2 \
+  '^dispatch-deepseek: refused — .*/info/grafts exists: grafts rewrite the history Base is judged on$'
+rm -f "$GCD/info/grafts"
+W=$WL; mktask ds/listed "$IX" LOW "$M0"; printf '%s\n' "$MAIN" > "$GCD/shallow" || die "shallow"; run
+expect "(q3) control: a shallow file in the common git dir -> refused" 2 \
+  '^dispatch-deepseek: refused — .*/shallow exists: a shallow repository cannot prove where Base lies$'
+rm -f "$GCD/shallow"
+# (r) origin is asked: a failing or empty ls-remote is a refusal, each its own message.
+git -C "$P" remote set-url origin "$T/nope.git" || die "set-url"; run
+expect "(r) control: git ls-remote origin fails -> refused" 2 \
+  '^dispatch-deepseek: refused — git ls-remote origin failed, so Base cannot be placed on a branch of origin$'
+git init -q --bare "$T/empty.git" && git -C "$P" remote set-url origin "$T/empty.git" || die "empty origin"; run
+expect "(r2) control: origin lists no branch -> refused" 2 \
+  '^dispatch-deepseek: refused — git ls-remote origin lists no branch, so Base cannot be placed on a branch of origin$'
+git -C "$P" remote set-url origin "$T/origin.git" || die "set-url back"; run
+expect "(r3) the same listed lane with origin restored: accepted" 0 "$(ovr ds/listed "$IX")" 'checks passed'
 
 # (n), (o) post-run: a lane that changes .deepseek-lanes or .no-deepseek changed its own judge.
 lane "$P" ds/post1 "$IX"; mktask ds/post1 "$IX" LOW "$M0"

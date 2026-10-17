@@ -12,9 +12,13 @@
 # task-lint's grammar, no trailing space, no CR; empty and `#` lines ignored). It is read ONLY from the TASK's Base
 # commit (never the worktree, the lane HEAD or the primary checkout) and validated whole before use: a malformed line
 # or a branch listed twice refuses every lane of a .no-deepseek repo, listed or not. The TASK's Branch: must equal a
-# listed branch exactly (no regex, no prefix), and Base must lie on a remote-tracking ref (a lane cannot push, so it
-# cannot move Base to a listing of its own); the override line names branch, Base and decision. Every other refusal
-# still applies to an overridden lane. A case that cannot be an override keeps the old refusal, first.
+# listed branch exactly (no regex, no prefix), and Base must be an ancestor of a branch head that `git ls-remote origin`
+# reports (a lane cannot push, so it cannot move Base to a listing of its own; a hand-made refs/remotes/ ref proves
+# nothing). The lane worktree shares .git with the primary, so replace objects are off (GIT_NO_REPLACE_OBJECTS=1) and
+# a refs/replace/ ref, an info/grafts file or a shallow file refuses the override. The override line names branch,
+# Base and decision. Every other refusal still applies to an overridden lane. A case that cannot be an override keeps
+# the old refusal, first. The listing is read at the lane's Base: revoking a lane means removing its line AND
+# re-cutting (or pruning) its worktree.
 # Refusals before dispatch exit 2. After the run the lane is judged on bytes and by judges it could not touch: it must
 # have added commits on its branch, left a clean tree (git errors and hidden index edits fail closed), changed nothing
 # under scripts/verify/, standards, .gitmodules, .deepseek-lanes or .no-deepseek (both sides of a rename), and then
@@ -38,6 +42,8 @@
 # from the lane's commit. No build lock (nothing is built); logs go to the worktree's git dir.
 # Every repo: a dispatcher that lies inside the lane worktree (the lane's own copy) is refused; run the primary's.
 set -eu
+# Every object is read as committed (as push-branch, close-check and merge-pr do): no replace refs.
+GIT_NO_REPLACE_OBJECTS=1; export GIT_NO_REPLACE_OBJECTS
 here=$(cd "$(dirname "$0")" && pwd -P)
 wt=${1:?absolute worktree path}; effort=${2:-max}
 case "$effort" in max|high) ;; *) echo "dispatch-deepseek: effort must be max or high, not '$effort'" >&2; exit 2;; esac
@@ -54,7 +60,7 @@ root=$(cd "$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)/.."
 # deleting or replacing the marker inside a lane changes nothing (retro review 12).
 # Exchange D-161: the TASK's Base may carry a `.deepseek-lanes` naming this lane (see the header). Here only what can
 # be read without a linted TASK is decided; anything that cannot be an override is the old refusal. The rest (Base an
-# ancestor of HEAD, Base on a remote-tracking ref) is decided after task-lint.
+# ancestor of HEAD, Base on a branch of origin) is decided after task-lint.
 ovr_branch=""; ovr_base=""; ovr_dec=""
 if [ -e "$top/.no-deepseek" ] || git -C "$root" cat-file -e HEAD:.no-deepseek 2>/dev/null || git -C "$wt" cat-file -e HEAD:.no-deepseek 2>/dev/null; then
   nods() { echo "dispatch-deepseek: refused — this repo never sends code to DeepSeek" >&2; exit 2; }
@@ -66,6 +72,16 @@ if [ -e "$top/.no-deepseek" ] || git -C "$root" cat-file -e HEAD:.no-deepseek 2>
   [ "${#ov}" -eq 40 ] || nods
   git -C "$wt" cat-file -e "$ov^{commit}" 2>/dev/null || nods
   dl_type=$(git -C "$wt" cat-file -t "$ov:.deepseek-lanes" 2>/dev/null) || nods
+  # Object substitution through the shared .git: replace refs (also off above), grafts and a shallow boundary each
+  # refuse the override, before the listing is read.
+  gcd=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir) && [ -n "$gcd" ] \
+    || { echo "dispatch-deepseek: refused — git rev-parse --git-common-dir failed in $wt" >&2; exit 2; }
+  reps=$(git -C "$wt" for-each-ref refs/replace/) || { echo "dispatch-deepseek: refused — git for-each-ref refs/replace/ failed in $wt" >&2; exit 2; }
+  [ -z "$reps" ] || { echo "dispatch-deepseek: refused — refs/replace/ holds a ref (git replace): .deepseek-lanes and Base cannot be read as committed" >&2; exit 2; }
+  [ ! -e "$gcd/info/grafts" ] && [ ! -L "$gcd/info/grafts" ] \
+    || { echo "dispatch-deepseek: refused — $gcd/info/grafts exists: grafts rewrite the history Base is judged on" >&2; exit 2; }
+  [ ! -e "$gcd/shallow" ] && [ ! -L "$gcd/shallow" ] \
+    || { echo "dispatch-deepseek: refused — $gcd/shallow exists: a shallow repository cannot prove where Base lies" >&2; exit 2; }
   dl_bad() { echo "dispatch-deepseek: refused — cannot read .deepseek-lanes at Base $ov ($1)" >&2; exit 2; }
   [ "$dl_type" = blob ] || dl_bad "a $dl_type, not a file"
   # Bytes, not a shell variable: a NUL becomes \001 (then never valid) instead of vanishing.
@@ -155,14 +171,24 @@ kind=$(sh "$here/owned-paths" --kind "$task") || { echo "dispatch-deepseek: refu
 branch=$(sed -n 's/^Branch: //p' "$task")
 [ "$(git -C "$wt" branch --show-current)" = "$branch" ] || { echo "dispatch-deepseek: branch mismatch" >&2; exit 2; }
 # Exchange D-161, after task-lint (Base a full sha and an ancestor of HEAD, Branch: the worktree's branch): the
-# override holds only for the linted branch and Base, and only when a remote-tracking ref contains Base.
+# override holds only for the linted branch and Base, and only when Base is an ancestor of a branch head of origin as
+# origin reports it now (ls-remote; local refs/remotes/ can be made by hand). A head not present locally, or not a
+# 40-hex sha, does not contain Base.
 if [ -n "$ovr_dec" ]; then
   { [ "$branch" = "$ovr_branch" ] && [ "$(sed -n 's/^Base: //p' "$task")" = "$ovr_base" ] \
     && git -C "$wt" merge-base --is-ancestor "$ovr_base" HEAD 2>/dev/null; } \
     || { echo "dispatch-deepseek: refused — this repo never sends code to DeepSeek" >&2; exit 2; }
-  remotes=$(git -C "$wt" for-each-ref --format='%(refname)' --contains "$ovr_base" refs/remotes/) \
-    || { echo "dispatch-deepseek: refused — git for-each-ref --contains $ovr_base failed in $wt" >&2; exit 2; }
-  [ -n "$remotes" ] || { echo "dispatch-deepseek: refused — .deepseek-lanes is read from Base $ovr_base, which no remote-tracking branch contains" >&2; exit 2; }
+  heads=$(git -C "$wt" ls-remote origin 'refs/heads/*' 2>/dev/null) \
+    || { echo "dispatch-deepseek: refused — git ls-remote origin failed, so Base cannot be placed on a branch of origin" >&2; exit 2; }
+  [ -n "$heads" ] || { echo "dispatch-deepseek: refused — git ls-remote origin lists no branch, so Base cannot be placed on a branch of origin" >&2; exit 2; }
+  contained=0
+  for h in $(printf '%s\n' "$heads" | awk '{ print $1 }'); do
+    case "$h" in *[!0-9a-f]*) continue;; esac
+    [ "${#h}" -eq 40 ] || continue
+    git -C "$wt" cat-file -e "$h^{commit}" 2>/dev/null || continue
+    if git -C "$wt" merge-base --is-ancestor "$ovr_base" "$h" 2>/dev/null; then contained=1; break; fi
+  done
+  [ "$contained" = 1 ] || { echo "dispatch-deepseek: refused — .deepseek-lanes is read from Base $ovr_base, which no branch of origin contains" >&2; exit 2; }
 fi
 # Headless `claude -p` never shows the trust dialog and ignores a project's permission allow rules until the
 # REPOSITORY ROOT (the primary checkout — a lane worktree inherits it) was trusted once interactively. Fail fast with
