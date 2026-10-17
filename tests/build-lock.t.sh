@@ -150,5 +150,56 @@ mkdir -p "$T/h/.cargo/bin"; cp "$T/bin/cargo" "$T/h/.cargo/bin/cargo"; live
 want "control: check under a live foreign lock with BUILD_LOCK_WAIT=0 -> BLOCKED rust, exit 1" 1 "^BLOCKED rust \\(build lock held by other-session, pid $LIVE, since 2026-10-03T10:00:00Z\\)\$" \
   env HOME="$T/h" BUILD_LOCK_WAIT=0 sh -c 'cd "$1" && sh "$2"' _ "$A" "$S/bin/check"
 unforeign
+# Exchange D-157: the cargo workspace moved to legacy/rust/Cargo.toml, so with no top-level Cargo.toml the shared
+# target, the switch clean and the stamp silently fell away. The workspace may sit in ONE tracked subdirectory (a
+# `[workspace]` line, at most 3 directory levels deep); several refuse. A second stub cargo logs its working directory.
+mkdir -p "$T/bin2"
+cat > "$T/bin2/cargo" << 'C'
+#!/bin/sh
+echo "$(pwd -P): cargo $*" >> "$TMPDIR/cargo2.log"
+case "$1" in metadata) echo '{"packages":[{"name":"m1"},{"name":"m2"}]}';; esac
+exit 0
+C
+chmod +x "$T/bin2/cargo"; P2="$T/bin2:/usr/bin:/bin"
+mkrepo(){ # mkrepo <dir> [<path> <content>]...: a fresh primary checkout with those files committed
+  _d=$1; shift; git init -q -b main "$_d"; printf '.worktrees/\n/target/\n' > "$_d/.gitignore"
+  while [ $# -ge 2 ]; do mkdir -p "$(dirname "$_d/$1")"; printf '%b' "$2" > "$_d/$1"; shift 2; done
+  git -C "$_d" add -A; git -C "$_d" commit -qm base; }
+WS='[workspace]\nmembers = ["m1"]\n'
+mkrepo "$T/n" legacy/rust/Cargo.toml "$WS" legacy/rust/m1/Cargo.toml '[package]\nname = "m1"\n'; N=$(cd "$T/n" && pwd -P)
+git -C "$N" worktree add -q "$N/.worktrees/a" -b lane/a main; git -C "$N" worktree add -q "$N/.worktrees/b" -b lane/b main
+NA="$N/.worktrees/a"; NB="$N/.worktrees/b"
+: > "$T/cargo2.log"
+out=$(env PATH="$P2" sh -c 'cd "$1" && sh "$2" sh -c "echo T=\$CARGO_TARGET_DIR"' _ "$NA" "$WBL" 2>&1); rc=$?
+check_ "(a) a nested legacy/rust workspace -> exit 0, CARGO_TARGET_DIR = <primary checkout>/target/shared" '[ "$rc" -eq 0 ] && printf "%s\n" "$out" | grep -Fqx "T=$N/target/shared"'
+check_ "(a) ... one stderr line names the workspace and the shared target" 'printf "%s\n" "$out" | grep -Fqx "build-lock: cargo workspace legacy/rust (shared target $N/target/shared)"'
+check_ "(a) ... the stamp holds <top>/legacy/rust" '[ "$(cat "$N/target/shared/.standards-worktree" 2>/dev/null)" = "$NA/legacy/rust" ]'
+check_ "(a) ... cargo metadata and the clean ran in legacy/rust" '[ "$(cat "$T/cargo2.log")" = "$(printf "%s: cargo metadata --no-deps --format-version 1\n%s: cargo clean -p m1 -p m2" "$NA/legacy/rust" "$NA/legacy/rust")" ]'
+: > "$T/cargo2.log"
+env PATH="$P2" sh -c 'cd "$1" && sh "$2" true' _ "$NB" "$WBL" > /dev/null 2>&1
+env PATH="$P2" sh -c 'cd "$1" && sh "$2" true' _ "$NB" "$WBL" > /dev/null 2>&1
+check_ "(b) a switch to worktree b with the nested workspace -> one clean in b's legacy/rust, none on the second call" '[ "$(cat "$T/cargo2.log")" = "$(printf "%s: cargo metadata --no-deps --format-version 1\n%s: cargo clean -p m1 -p m2" "$NB/legacy/rust" "$NB/legacy/rust")" ] && [ "$(cat "$N/target/shared/.standards-worktree" 2>/dev/null)" = "$NB/legacy/rust" ]'
+mkrepo "$T/c2" a/Cargo.toml "$WS" b/c/Cargo.toml "$WS"; M=$(cd "$T/c2" && pwd -P)
+want "(c) control: two nested workspace roots -> exit 1 with the several-workspaces message" 1 "^build-lock: several cargo workspaces in $M \\(a, b/c\\); the shared target cannot be placed\$" \
+  env PATH="$P2" sh -c 'cd "$1" && sh "$2" touch "$3/ran-c"' _ "$M" "$WBL" "$T"
+check_ "(c) control: ... nothing ran and no shared target was made" '[ ! -e "$T/ran-c" ] && [ ! -e "$M/target" ]'
+mkrepo "$T/d" crates/x/Cargo.toml '[package]\nname = "x"\n'; D=$(cd "$T/d" && pwd -P)
+want "(d) control: only a member Cargo.toml ([package], no [workspace]) -> exit 0, CARGO_TARGET_DIR unset" 0 '^T=$' \
+  env PATH="$P2" sh -c 'cd "$1" && sh "$2" sh -c "echo T=\$CARGO_TARGET_DIR"' _ "$D" "$WBL"
+mkrepo "$T/e"; E=$(cd "$T/e" && pwd -P); mkdir -p "$E/legacy/rust"; printf '%b' "$WS" > "$E/legacy/rust/Cargo.toml"
+want "(e) control: an untracked nested workspace Cargo.toml -> ignored, exit 0, CARGO_TARGET_DIR unset" 0 '^T=$' \
+  env PATH="$P2" sh -c 'cd "$1" && sh "$2" sh -c "echo T=\$CARGO_TARGET_DIR"' _ "$E" "$WBL"
+mkrepo "$T/f" a/b/c/d/Cargo.toml "$WS"; F=$(cd "$T/f" && pwd -P)
+want "(f) control: a nested workspace four directory levels deep -> ignored, exit 0, CARGO_TARGET_DIR unset" 0 '^T=$' \
+  env PATH="$P2" sh -c 'cd "$1" && sh "$2" sh -c "echo T=\$CARGO_TARGET_DIR"' _ "$F" "$WBL"
+mkrepo "$T/g" Cargo.toml "$WS" legacy/rust/Cargo.toml "$WS"; G=$(cd "$T/g" && pwd -P)
+: > "$T/cargo2.log"
+out=$(env PATH="$P2" sh -c 'cd "$1" && sh "$2" sh -c "echo T=\$CARGO_TARGET_DIR"' _ "$G" "$WBL" 2>&1); rc=$?
+check_ "(g) control: a top-level Cargo.toml plus a nested workspace -> the top wins (target, stamp <top>, cargo in <top>)" '[ "$rc" -eq 0 ] && printf "%s\n" "$out" | grep -Fqx "T=$G/target/shared" && [ "$(cat "$G/target/shared/.standards-worktree" 2>/dev/null)" = "$G" ] && [ "$(cat "$T/cargo2.log")" = "$(printf "%s: cargo metadata --no-deps --format-version 1\n%s: cargo clean -p m1 -p m2" "$G" "$G")" ]'
+check_ "(g) control: ... and no stderr workspace line" '! printf "%s\n" "$out" | grep -q "cargo workspace"'
+mkdir -p "$T/gitstub"; printf '#!/bin/sh\ncase " $* " in *" ls-files "*) exit 128;; esac\nexec %s "$@"\n' "$(command -v git)" > "$T/gitstub/git"; chmod +x "$T/gitstub/git"
+want "(h) control: a failing git ls-files -> exit 1 with its message" 1 "^build-lock: could not list the tracked Cargo.toml files of $D\$" \
+  env PATH="$T/gitstub:$P2" sh -c 'cd "$1" && sh "$2" touch "$3/ran-h"' _ "$D" "$WBL" "$T"
+check_ "(h) control: ... nothing ran" '[ ! -e "$T/ran-h" ]'
 kill "$LIVE"; wait "$LIVE" 2>/dev/null
 rm -rf "$T"; [ $R -eq 0 ] && echo "build-lock.t: all cases behave" || echo "build-lock.t: FAILURES"; exit $R
