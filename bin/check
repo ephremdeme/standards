@@ -2,16 +2,18 @@
 # Portable (POSIX sh) full local gate. No pass-result caching (by design; add only after measured need).
 # Artifact caches (sccache, cargo/npm caches) are fine. CI on the integrated change stays authoritative.
 # Exit 0 only if every applicable step passed. Missing tool = BLOCKED = failure (never silently skipped).
-# Usage: check [--only rust|web|all]   (default all). Lane checks match the lane (C6, founder 2026-10-03): a lane runs
+# Usage: check [--only rust|web|go|all]   (default all). Lane checks match the lane (C6, founder 2026-10-03): a lane runs
 # `--only <kind>` with <kind> from `owned-paths --kind TASK.md`; integrated CI runs check without --only (everything).
 # The secret scans and the agent-definitions step always run. The Rust steps run under the machine build lock with the
 # repo's shared CARGO_TARGET_DIR (C5, bin/build-lock.sh); a lock held elsewhere after BUILD_LOCK_WAIT is BLOCKED rust.
+# A Go module (go.mod) runs make gen, the committed-output check, make lint and make test, without the build lock
+# (exchange D-158: Go's memory is small and its cache is per-user).
 set -u
-usage() { echo "check: usage: check [--only rust|web|all]" >&2; exit 2; }
+usage() { echo "check: usage: check [--only rust|web|go|all]" >&2; exit 2; }
 only=all
 if [ $# -gt 0 ]; then
   [ $# -eq 2 ] && [ "$1" = "--only" ] || usage
-  case "$2" in rust|web|all) only=$2;; *) usage;; esac
+  case "$2" in rust|web|go|all) only=$2;; *) usage;; esac
 fi
 export NO_COLOR=1 FORCE_COLOR=0 CI=1
 # User-local toolchains (rustup, cargo-installed tools, gitleaks, gh) without touching the caller's shell profile.
@@ -26,7 +28,7 @@ step() { name=$1; shift; out=$("$@" 2>&1); rc=$?
   if [ $rc -eq 0 ]; then echo "PASS  $name"; else echo "FAIL  $name"; echo "$out" | tail -n 15 | sed 's/^/      /'; fail=1; fi; }
 need() { command -v "$1" >/dev/null 2>&1 || { echo "BLOCKED $2 (missing tool: $1)"; fail=1; return 1; }; }
 
-if [ "$only" = web ]; then echo "SKIP  rust (--only web)"
+if [ "$only" = web ] || [ "$only" = go ]; then echo "SKIP  rust (--only $only)"
 elif [ -f Cargo.toml ]; then
   if need cargo "rust"; then
     BUILD_LOCK_WHO=check; . "$(dirname "$0")/build-lock.sh"
@@ -47,7 +49,7 @@ elif [ -f Cargo.toml ]; then
   fi
 else echo "SKIP  rust (no Cargo.toml)"; fi
 
-if [ "$only" = rust ]; then echo "SKIP  frontend (--only rust)"
+if [ "$only" = rust ] || [ "$only" = go ]; then echo "SKIP  frontend (--only $only)"
 elif [ -f web/package.json ]; then
   if need npm "frontend"; then
     # Always a clean install from the lockfile: a pre-existing node_modules is never trusted (retro review 8).
@@ -59,6 +61,41 @@ elif [ -f web/package.json ]; then
     step "bundle budget"   sh -c 'cd web && npm run --silent budget'
   fi
 else echo "SKIP  frontend (no web/package.json)"; fi
+
+# Go (exchange D-158): no build lock. `make gen` must leave the working tree as it found it: a snapshot taken right
+# before it (tracked changes, then every untracked file under an `untracked <path>` header, which also carries the
+# untracked list, plus `git status --porcelain`) is compared with one taken after, so a lane's own uncommitted work
+# counts only where gen changed it. Every producer's exit status is checked: a failed snapshot is a FAIL, never a pass.
+go_snap() { # go_snap <file>
+  git diff HEAD --binary > "$1" && git ls-files -z --others --exclude-standard > "$1.z" &&
+    xargs -0 sh -c 'for f do printf "untracked %s\n" "$f"; cat -- "$f" || exit 1; done' sh < "$1.z" >> "$1" &&
+    git status --porcelain > "$1.st"
+}
+go_committed() {
+  d=$go_snap_dir
+  if [ "$go_snap_rc" -ne 0 ] || ! go_snap "$d/after"; then echo "could not snapshot the working tree"; return 1; fi
+  cmp -s "$d/before" "$d/after" && cmp -s "$d/before.st" "$d/after.st" && return 0
+  echo "make gen changed the working tree; commit the generated code. Changed:"
+  diff "$d/before.st" "$d/after.st" | grep '^[<>]' | sed 's/^</before:/; s/^>/after: /'
+  # The chunks (one per `diff --git` or `untracked` header) that differ: names a path whose status line is unchanged.
+  awk 'FNR == 1 { k = "" } FILENAME == ARGV[1] { s = "a" } FILENAME == ARGV[2] { s = "b" }
+    /^diff --git / || /^untracked / { k = $0 } { c[s, k] = c[s, k] $0 "\n"; seen[k] = 1 }
+    END { for (k in seen) if (c["a", k] != c["b", k]) print "content: " k }' "$d/before" "$d/after"
+  return 1
+}
+if [ "$only" = rust ] || [ "$only" = web ]; then echo "SKIP  go (--only $only)"
+elif [ -f go.mod ]; then
+  go_ok=1; need go "go" || go_ok=0; need make "go" || go_ok=0
+  if [ $go_ok -eq 1 ] && [ ! -f Makefile ]; then echo "BLOCKED go (no Makefile with gen, lint and test targets)"; fail=1
+  elif [ $go_ok -eq 1 ]; then
+    go_snap_rc=1; go_snap_dir=$(mktemp -d) && { go_snap "$go_snap_dir/before"; go_snap_rc=$?; }
+    step "go generate (make gen)" make gen
+    step "generated code committed (make gen changed nothing)" go_committed
+    step "go lint (make lint)" make lint
+    step "go tests (make test)" make test
+    [ -z "$go_snap_dir" ] || rm -rf "$go_snap_dir"
+  fi
+else echo "SKIP  go (no go.mod)"; fi
 
 if [ -d .claude/agents ] && [ -d standards/agents ]; then
   step "agent definitions match pinned standards" diff -r standards/agents .claude/agents
