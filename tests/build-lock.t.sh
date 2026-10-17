@@ -175,10 +175,10 @@ check_ "(a) a nested legacy/rust workspace -> exit 0, CARGO_TARGET_DIR = <primar
 check_ "(a) ... one stderr line names the workspace and the shared target" 'printf "%s\n" "$out" | grep -Fqx "build-lock: cargo workspace legacy/rust (shared target $N/target/shared)"'
 check_ "(a) ... the stamp holds <top>/legacy/rust" '[ "$(cat "$N/target/shared/.standards-worktree" 2>/dev/null)" = "$NA/legacy/rust" ]'
 check_ "(a) ... cargo metadata and the clean ran in legacy/rust" '[ "$(cat "$T/cargo2.log")" = "$(printf "%s: cargo metadata --no-deps --format-version 1\n%s: cargo clean -p m1 -p m2" "$NA/legacy/rust" "$NA/legacy/rust")" ]'
-: > "$T/cargo2.log"
+: > "$T/cargo2.log"; mkdir -p "$N/target/shared/release/.fingerprint" "$N/target/shared/p2/.fingerprint"
 env PATH="$P2" sh -c 'cd "$1" && sh "$2" true' _ "$NB" "$WBL" > /dev/null 2>&1
 env PATH="$P2" sh -c 'cd "$1" && sh "$2" true' _ "$NB" "$WBL" > /dev/null 2>&1
-check_ "(b) a switch to worktree b with the nested workspace -> one clean in b's legacy/rust, none on the second call" '[ "$(cat "$T/cargo2.log")" = "$(printf "%s: cargo metadata --no-deps --format-version 1\n%s: cargo clean -p m1 -p m2" "$NB/legacy/rust" "$NB/legacy/rust")" ] && [ "$(cat "$N/target/shared/.standards-worktree" 2>/dev/null)" = "$NB/legacy/rust" ]'
+check_ "(b) a switch to worktree b with the nested workspace and release/p2 profiles -> one clean per profile in b's legacy/rust, none on the second call" '[ "$(cat "$T/cargo2.log")" = "$(printf "%s: cargo metadata --no-deps --format-version 1\n%s: cargo clean -p m1 -p m2\n%s: cargo clean -p m1 -p m2 --profile p2\n%s: cargo clean -p m1 -p m2 --release" "$NB/legacy/rust" "$NB/legacy/rust" "$NB/legacy/rust" "$NB/legacy/rust")" ] && [ "$(cat "$N/target/shared/.standards-worktree" 2>/dev/null)" = "$NB/legacy/rust" ]'
 mkrepo "$T/c2" a/Cargo.toml "$WS" b/c/Cargo.toml "$WS"; M=$(cd "$T/c2" && pwd -P)
 want "(c) control: two nested workspace roots -> exit 1 with the several-workspaces message" 1 "^build-lock: several cargo workspaces in $M \\(a, b/c\\); the shared target cannot be placed\$" \
   env PATH="$P2" sh -c 'cd "$1" && sh "$2" touch "$3/ran-c"' _ "$M" "$WBL" "$T"
@@ -201,5 +201,28 @@ mkdir -p "$T/gitstub"; printf '#!/bin/sh\ncase " $* " in *" ls-files "*) exit 12
 want "(h) control: a failing git ls-files -> exit 1 with its message" 1 "^build-lock: could not list the tracked Cargo.toml files of $D\$" \
   env PATH="$T/gitstub:$P2" sh -c 'cd "$1" && sh "$2" touch "$3/ran-h"' _ "$D" "$WBL" "$T"
 check_ "(h) control: ... nothing ran" '[ ! -e "$T/ran-h" ]'
+# Review round (f48f63a): an unreadable workspace candidate refuses; the depth bound includes 3 levels; the listing is
+# unquoted and pathspec-free (non-ASCII names, GIT_LITERAL_PATHSPECS); a still-quoted Cargo.toml name refuses; the
+# header may be indented or carry a trailing comment.
+tws(){ env PATH="$P2" "$@" sh -c 'cd "$1" && sh "$2" sh -c "echo T=\$CARGO_TARGET_DIR"' _ "$TOPDIR" "$WBL"; }
+mkrepo "$T/i" legacy/rust/Cargo.toml "$WS"; TOPDIR=$(cd "$T/i" && pwd -P)
+if [ "$(id -u)" -eq 0 ]; then echo "SKIP    (i) control: an unreadable tracked legacy/rust/Cargo.toml (root reads anything)"
+else
+  chmod 000 "$TOPDIR/legacy/rust/Cargo.toml"
+  want "(i) control: an unreadable tracked legacy/rust/Cargo.toml -> exit 1 with its message" 1 "^build-lock: could not read $TOPDIR/legacy/rust/Cargo\\.toml; the shared target cannot be placed\$" tws
+  chmod 644 "$TOPDIR/legacy/rust/Cargo.toml"
+fi
+mkrepo "$T/j" a/b/c/Cargo.toml "$WS"; TOPDIR=$(cd "$T/j" && pwd -P)
+want "(j) a workspace three directory levels deep (a/b/c) -> found" 0 "^T=$TOPDIR/target/shared\$" tws
+mkrepo "$T/k" 'légacy/rust/Cargo.toml' "$WS"; TOPDIR=$(cd "$T/k" && pwd -P)
+want "(k) a workspace under a non-ASCII directory -> found and named unquoted" 0 "^build-lock: cargo workspace légacy/rust \\(shared target $TOPDIR/target/shared\\)\$" tws
+mkrepo "$T/l" legacy/rust/Cargo.toml "$WS"; TOPDIR=$(cd "$T/l" && pwd -P)
+want "(l) GIT_LITERAL_PATHSPECS=1 exported -> the workspace is still found" 0 "^T=$TOPDIR/target/shared\$" tws GIT_LITERAL_PATHSPECS=1
+mkrepo "$T/m2" 'x"y/Cargo.toml' "$WS"; TOPDIR=$(cd "$T/m2" && pwd -P)
+want "(m) control: a tracked Cargo.toml whose name git still quotes -> exit 1, the listing refuses" 1 "^build-lock: could not list the tracked Cargo.toml files of $TOPDIR\$" tws
+mkrepo "$T/n2" legacy/rust/Cargo.toml '[workspace] # root\nmembers = []\n'; TOPDIR=$(cd "$T/n2" && pwd -P)
+want "(n) a header with a trailing comment ([workspace] # root) -> found" 0 "^T=$TOPDIR/target/shared\$" tws
+mkrepo "$T/o" legacy/rust/Cargo.toml '  [workspace]\nmembers = []\n'; TOPDIR=$(cd "$T/o" && pwd -P)
+want "(o) an indented header (  [workspace]) -> found" 0 "^T=$TOPDIR/target/shared\$" tws
 kill "$LIVE"; wait "$LIVE" 2>/dev/null
 rm -rf "$T"; [ $R -eq 0 ] && echo "build-lock.t: all cases behave" || echo "build-lock.t: FAILURES"; exit $R

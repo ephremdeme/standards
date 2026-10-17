@@ -28,7 +28,7 @@
 # root and trusts mtimes, so before a different worktree builds there, every workspace member is cleaned
 # (`cargo clean -p`), dependencies stay cached; the stamp target/shared/.standards-worktree names the last builder.
 # The cargo workspace is <top>/Cargo.toml, else the one tracked subdirectory Cargo.toml (≤ 3 levels) with a [workspace]
-# line (exchange D-157: legacy/rust; several refuse): the clean runs there and the stamp names that directory.
+# header line, indented or with a trailing comment (exchange D-157: legacy/rust; several refuse): the clean runs there and the stamp names that directory.
 # Every failure refuses (fail closed). Variables of this library start with _bl_ or BUILD_LOCK_.
 
 build_lock_acquire() {
@@ -139,17 +139,23 @@ build_lock_release() {
 _bl_cleanfail() { echo "build-lock: could not clean the previous worktree's workspace crates; nothing was built" >&2; return 1; }
 
 # The cargo workspace of a checkout <top> without a top-level Cargo.toml (exchange D-157: legacy/rust): the directory of
-# the one TRACKED Cargo.toml at most 3 directory levels deep with a `[workspace]` line. Prints <top>/<dir>, or nothing
-# when there is none (nothing to share); several refuse (never guess), as does a listing or a read that fails.
+# the one TRACKED Cargo.toml at most 3 directory levels deep with a `[workspace]` header line (indented or with a
+# trailing comment). Prints <top>/<dir>, or nothing when there is none (nothing to share); several refuse (never guess),
+# as does a listing or a read that fails. The listing takes no pathspec (GIT_LITERAL_PATHSPECS and friends cannot change
+# it) and is unquoted (core.quotePath=false: non-ASCII names come through as they are); a Cargo.toml name git still
+# quotes (a quote, a control character) cannot be read safely and refuses.
 _bl_find_ws() {
-  _bl_ls=$(git -C "$1" ls-files -- 'Cargo.toml' '*/Cargo.toml' 2>/dev/null) || {
+  _bl_ls=$(git -c core.quotePath=false -C "$1" ls-files 2>/dev/null) || {
     echo "build-lock: could not list the tracked Cargo.toml files of $1" >&2; return 1; }
   _bl_found=$(printf '%s\n' "$_bl_ls" | while IFS= read -r _bl_f; do
+      case "$_bl_f" in \"*Cargo.toml\") echo "/quoted"; continue;; esac
       case "$_bl_f" in */*/*/*/*) continue;; */Cargo.toml) ;; *) continue;; esac
       [ -e "$1/$_bl_f" ] || continue   # tracked, but deleted in this worktree
-      grep -Eq '^\[workspace\][[:space:]]*$' "$1/$_bl_f" 2>/dev/null; _bl_g=$?
+      grep -Eq '^[[:space:]]*\[workspace\][[:space:]]*(#.*)?$' "$1/$_bl_f" 2>/dev/null; _bl_g=$?
       case $_bl_g in 0) printf '%s\n' "${_bl_f%/Cargo.toml}";; 1) ;; *) printf '/unreadable %s\n' "$_bl_f";; esac
     done | LC_ALL=C sort) || { echo "build-lock: could not list the tracked Cargo.toml files of $1" >&2; return 1; }
+  if printf '%s\n' "$_bl_found" | grep -qx '/quoted'; then
+    echo "build-lock: could not list the tracked Cargo.toml files of $1" >&2; return 1; fi
   if _bl_u=$(printf '%s\n' "$_bl_found" | grep '^/unreadable ' | head -n 1) && [ -n "$_bl_u" ]; then
     echo "build-lock: could not read $1/${_bl_u#/unreadable }; the shared target cannot be placed" >&2; return 1; fi
   _bl_cnt=$(printf '%s\n' "$_bl_found" | grep -c .)
