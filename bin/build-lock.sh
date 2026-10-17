@@ -27,6 +27,8 @@
 # Shared target: <primary checkout>/target/shared. Cargo keys workspace crates by their path relative to the workspace
 # root and trusts mtimes, so before a different worktree builds there, every workspace member is cleaned
 # (`cargo clean -p`), dependencies stay cached; the stamp target/shared/.standards-worktree names the last builder.
+# The cargo workspace is <top>/Cargo.toml, else the one tracked subdirectory Cargo.toml (≤ 3 levels) with a [workspace]
+# header line, indented or with a trailing comment (exchange D-157: legacy/rust; several refuse): the clean runs there and the stamp names that directory.
 # Every failure refuses (fail closed). Variables of this library start with _bl_ or BUILD_LOCK_.
 
 build_lock_acquire() {
@@ -136,6 +138,35 @@ build_lock_release() {
 
 _bl_cleanfail() { echo "build-lock: could not clean the previous worktree's workspace crates; nothing was built" >&2; return 1; }
 
+# The cargo workspace of a checkout <top> without a top-level Cargo.toml (exchange D-157: legacy/rust): the directory of
+# the one TRACKED Cargo.toml at most 3 directory levels deep with a `[workspace]` header line (indented or with a
+# trailing comment). Prints <top>/<dir>, or nothing when there is none (nothing to share); several refuse (never guess),
+# as does a listing or a read that fails. The listing takes no pathspec (GIT_LITERAL_PATHSPECS and friends cannot change
+# it) and is unquoted (core.quotePath=false: non-ASCII names come through as they are); a Cargo.toml name git still
+# quotes (a quote, a control character) cannot be read safely and refuses.
+_bl_find_ws() {
+  _bl_ls=$(git -c core.quotePath=false -C "$1" ls-files 2>/dev/null) || {
+    echo "build-lock: could not list the tracked Cargo.toml files of $1" >&2; return 1; }
+  _bl_found=$(printf '%s\n' "$_bl_ls" | while IFS= read -r _bl_f; do
+      case "$_bl_f" in \"*Cargo.toml\") echo "/quoted"; continue;; esac
+      case "$_bl_f" in */*/*/*/*) continue;; */Cargo.toml) ;; *) continue;; esac
+      [ -e "$1/$_bl_f" ] || continue   # tracked, but deleted in this worktree
+      grep -Eq '^[[:space:]]*\[workspace\][[:space:]]*(#.*)?$' "$1/$_bl_f" 2>/dev/null; _bl_g=$?
+      case $_bl_g in 0) printf '%s\n' "${_bl_f%/Cargo.toml}";; 1) ;; *) printf '/unreadable %s\n' "$_bl_f";; esac
+    done | LC_ALL=C sort) || { echo "build-lock: could not list the tracked Cargo.toml files of $1" >&2; return 1; }
+  if printf '%s\n' "$_bl_found" | grep -qx '/quoted'; then
+    echo "build-lock: could not list the tracked Cargo.toml files of $1" >&2; return 1; fi
+  if _bl_u=$(printf '%s\n' "$_bl_found" | grep '^/unreadable ' | head -n 1) && [ -n "$_bl_u" ]; then
+    echo "build-lock: could not read $1/${_bl_u#/unreadable }; the shared target cannot be placed" >&2; return 1; fi
+  _bl_cnt=$(printf '%s\n' "$_bl_found" | grep -c .)
+  case "$_bl_cnt" in
+    0) return 0;;
+    1) printf '%s\n' "$1/$_bl_found";;
+    *) echo "build-lock: several cargo workspaces in $1 ($(printf '%s\n' "$_bl_found" | head -n 5 | awk 'NR > 1 { printf ", " } { printf "%s", $0 }')); the shared target cannot be placed" >&2
+       return 1;;
+  esac
+}
+
 # Shared target dir, switch clean and sccache for the cargo commands the caller runs next (call after acquiring).
 build_lock_env() {
   # cargo and sccache are looked for on PATH, then in $HOME/.cargo/bin (appended, so the caller's own tools keep
@@ -155,23 +186,29 @@ build_lock_env() {
     [ -f Cargo.toml ] || return 0   # no git checkout and no cargo workspace here: nothing to share
     echo "build-lock: $(pwd -P) is not inside a git checkout; the shared target cannot be placed" >&2; return 1
   fi
-  [ -f "$_bl_top/Cargo.toml" ] || return 0   # no cargo workspace in this checkout
+  # The workspace directory: <top> when <top>/Cargo.toml exists, else the one tracked nested workspace (_bl_find_ws).
+  _bl_ws=$_bl_top
+  if [ ! -f "$_bl_top/Cargo.toml" ]; then
+    _bl_ws=$(_bl_find_ws "$_bl_top") || return 1
+    [ -n "$_bl_ws" ] || return 0   # no cargo workspace in this checkout
+  fi
   if [ -z "${CARGO_TARGET_DIR:-}" ]; then
     _bl_common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) && [ -n "$_bl_common" ] \
       && _bl_primary=$(cd "$_bl_common/.." && pwd -P) \
       || { echo "build-lock: could not find the primary checkout of $_bl_top" >&2; return 1; }
     CARGO_TARGET_DIR="$_bl_primary/target/shared"; export CARGO_TARGET_DIR
   fi
+  [ "$_bl_ws" = "$_bl_top" ] || echo "build-lock: cargo workspace ${_bl_ws#"$_bl_top"/} (shared target $CARGO_TARGET_DIR)" >&2
   _bl_stamp="$CARGO_TARGET_DIR/.standards-worktree"
   _bl_prev=$(cat "$_bl_stamp" 2>/dev/null) || _bl_prev=""
-  [ "$_bl_prev" != "$_bl_top" ] || return 0
+  [ "$_bl_prev" != "$_bl_ws" ] || return 0
   # A different (or unknown) worktree built last: clean every workspace member before anything builds here. Cargo was
   # looked for at the top (PATH, then $HOME/.cargo/bin); a cargo the caller can reach only by an absolute path would
   # otherwise skip the clean — so a missing cargo refuses (fail closed).
   command -v cargo >/dev/null 2>&1 || {
     echo "build-lock: cargo is not on PATH or in \$HOME/.cargo/bin, so the previous worktree's workspace crates cannot be cleaned; nothing was built" >&2; return 1; }
   command -v jq >/dev/null 2>&1 || { echo "build-lock: jq is required to list the workspace crates" >&2; _bl_cleanfail; return 1; }
-  _bl_meta=$(cd "$_bl_top" && cargo metadata --no-deps --format-version 1 2>/dev/null) || { _bl_cleanfail; return 1; }
+  _bl_meta=$(cd "$_bl_ws" && cargo metadata --no-deps --format-version 1 2>/dev/null) || { _bl_cleanfail; return 1; }
   _bl_names=$(printf '%s\n' "$_bl_meta" | jq -r '.packages[].name' 2>/dev/null) || { _bl_cleanfail; return 1; }
   [ -n "$_bl_names" ] || { _bl_cleanfail; return 1; }
   set --
@@ -181,15 +218,15 @@ build_lock_env() {
   done
   # `cargo clean -p` cleans one profile directory: dev (debug/) always, then every other profile directory present in
   # the shared target (release/ -> --release, <name>/ -> --profile <name>; a directory with a .fingerprint/ is a profile).
-  (cd "$_bl_top" && cargo clean "$@") >/dev/null 2>&1 || { _bl_cleanfail; return 1; }
+  (cd "$_bl_ws" && cargo clean "$@") >/dev/null 2>&1 || { _bl_cleanfail; return 1; }
   for _bl_pd in "$CARGO_TARGET_DIR"/*/.fingerprint; do
     [ -d "$_bl_pd" ] || continue
     _bl_p=${_bl_pd%/.fingerprint}; _bl_p=${_bl_p##*/}
     case "$_bl_p" in debug) continue;; ''|-*|*[!A-Za-z0-9_-]*) _bl_cleanfail; return 1;; esac
-    if [ "$_bl_p" = release ]; then (cd "$_bl_top" && cargo clean "$@" --release) >/dev/null 2>&1 || { _bl_cleanfail; return 1; }
-    else (cd "$_bl_top" && cargo clean "$@" --profile "$_bl_p") >/dev/null 2>&1 || { _bl_cleanfail; return 1; }; fi
+    if [ "$_bl_p" = release ]; then (cd "$_bl_ws" && cargo clean "$@" --release) >/dev/null 2>&1 || { _bl_cleanfail; return 1; }
+    else (cd "$_bl_ws" && cargo clean "$@" --profile "$_bl_p") >/dev/null 2>&1 || { _bl_cleanfail; return 1; }; fi
   done
-  { mkdir -p "$CARGO_TARGET_DIR" && printf '%s\n' "$_bl_top" > "$_bl_stamp"; } 2>/dev/null \
+  { mkdir -p "$CARGO_TARGET_DIR" && printf '%s\n' "$_bl_ws" > "$_bl_stamp"; } 2>/dev/null \
     || { echo "build-lock: could not write $_bl_stamp; nothing was built" >&2; return 1; }
   return 0
 }
