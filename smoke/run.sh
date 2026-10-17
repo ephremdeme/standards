@@ -108,7 +108,7 @@ mkdir -p "$T/nohome"; env HOME="$T/nohome" PATH=/usr/bin:/bin "$T/game/standards
 if [ $rc -eq 1 ] && grep -q '^SKIP  frontend (--only rust)$' "$T/o" && ! grep -q 'web unit tests' "$T/o"; then ok "check --only rust: the front-end block is skipped"
 else bad "check --only rust: the front-end block is skipped (rc=$rc, want 1 + SKIP  frontend (--only rust))"; tail -n 8 "$T/o"; fi
 "$T/game/standards/bin/check" --only bogus > "$T/o" 2>&1; rc=$?
-if [ $rc -eq 2 ] && grep -q '^check: usage: check \[--only rust|web|all\]$' "$T/o"; then ok "control: check --only bogus -> usage, exit 2"
+if [ $rc -eq 2 ] && grep -q '^check: usage: check \[--only rust|web|go|all\]$' "$T/o"; then ok "control: check --only bogus -> usage, exit 2"
 else bad "control: check --only bogus -> usage, exit 2 (rc=$rc)"; tail -n 4 "$T/o"; fi
 # C5 shared target: cargo keys workspace crates by their path relative to the workspace root and trusts mtimes, so a
 # raw shared CARGO_TARGET_DIR runs another worktree's compiled tests as this one's; with-build-lock cleans the workspace
