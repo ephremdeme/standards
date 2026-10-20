@@ -85,7 +85,8 @@ case "$pr" in ''|0*|*[!0-9]*) refuse "$pr is not a PR number";; esac
 [ $llog_set -eq 0 ] || [ "$r" != ephremdeme/standards ] \
   || refuse "--local-log applies to ephremdeme/exchange and ephremdeme/game only (ephremdeme/standards uses --smoke-log)"
 if [ $ms_set -eq 1 ]; then
-  case "$ms" in [a-z]*[0-9]*) ;; *) refuse "$ms is not a milestone id";; esac
+  # A lowercase letter first; no digit is required (exchange gp, 2026-10-20: local-gate accepts digit-less ids).
+  case "$ms" in [a-z]*) ;; *) refuse "$ms is not a milestone id";; esac
   case "$ms" in *[!a-z0-9.]*|*.|*..*) refuse "$ms is not a milestone id";; esac
 fi
 if [ $resid_set -eq 1 ]; then
