@@ -110,6 +110,12 @@ mk; refused "a PR number that is not a number" '12x is not a PR number$' $EX 12x
 mk; refused "--residual without --milestone" '--residual applies to milestone PRs only$' $EX 12 "$H" --residual D-090
 mk; refused "--smoke-log outside standards" '--smoke-log applies to ephremdeme/standards only$' $EX 12 "$H" --smoke-log "$T/none"
 mk; refused "a milestone id with a path in it" "e9/\.\. is not a milestone id\$" $EX 12 "$H" --milestone e9/..
+# A milestone id needs no digit (exchange gp, PR #23, 2026-10-20: `gp` was refused although local-gate accepts it); it
+# still starts with a lowercase letter and holds only lowercase letters, digits and dots.
+mk integration/9x; refused "a milestone id starting with a digit" "9x is not a milestone id\$" $EX 12 "$H" --milestone 9x
+mk integration/Gp; refused "an upper-case milestone id" "Gp is not a milestone id\$" $EX 12 "$H" --milestone Gp
+mk integration/go-port; refused "a milestone id with a hyphen" "go-port is not a milestone id\$" $EX 12 "$H" --milestone go-port
+mk integration/go-port; refused "a digit-less id on another integration branch" '--milestone gp does not match the head branch integration/go-port \(integration/gp expected\)$' $EX 12 "$H" --milestone gp
 mk; refused "a residual id that is not D-NNN" 'D-9x is not a decision id \(D-NNN\)$' $EX 12 "$H" $MS --residual D-9x
 # Rule 2: the PR.
 mk; pr CLOSED false "$H" main $IB false 1; refused "a closed PR" 'PR #12 is CLOSED, not OPEN$' $EX 12 "$H" $MS
@@ -290,5 +296,9 @@ mk $LB; pr OPEN false "$H" main $LB false 1; nochecks; glog 'check: OK' 'verify:
 merged "a lane PR on game whose gate is m2_2 (an id with _)" "merge-pr: OK $GA#12 $H merged" $GA 12 "$H" --local-log "$LL"
 mk; nochecks; greenlog; merged "a milestone merge with a local gate log" "merge-pr: OK $EX#12 $H merged milestone e9" $EX 12 "$H" $MS --local-log "$LL"
 check_ "... no nightly run, check run or status read; the review file and both labels' timing were" '[ -e "$G/merge" ] && ! grep -q -e nightly -e check-runs -e /status "$G/calls" && grep -Fqx "api repos/$EX/contents/$RV?ref=$H" "$G/calls" && grep -q timeline "$G/calls"'
+mk integration/gp; compare ahead docs/md-reports/gp-milestone-review.md; nochecks
+glog 'check: OK' 'verify:gp — 407 ok, 0 failed' "$GHL" "$GT" 'gate-verdict: green gp'
+merged "a milestone merge whose id has no digit (gp)" "merge-pr: OK $EX#12 $H merged milestone gp" $EX 12 "$H" --milestone gp --local-log "$LL"
+check_ "... the review file read is gp's" 'grep -Fqx "api repos/$EX/contents/docs/md-reports/gp-milestone-review.md?ref=$H" "$G/calls"'
 want "two arguments -> usage, exit 2" 2 '^merge-pr: usage: merge-pr ' sh "$MP" $EX 12
 rm -rf "$T"; [ $R -eq 0 ] && echo "merge-pr.t: all cases behave" || echo "merge-pr.t: FAILURES"; exit $R
