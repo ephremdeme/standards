@@ -34,9 +34,12 @@ W="$T/w"; git init -q -b main "$W"; echo a > "$W/f"; git -C "$W" add f; git -C "
 git -C "$W" remote add origin "$U"; git -C "$W" push -q origin refs/heads/main:refs/heads/main
 W=$(cd "$W" && pwd -P); WROOT=$(git -C "$W" rev-list --max-parents=0 main)
 GROOT=5b469d2caa001c168e63498d32ad7637fee837f9   # game's real root commit (git -C <game> rev-list --max-parents=0 HEAD, 2026-10-06)
-printf 'standards %s\nexchange %s\nhub 1111111111111111111111111111111111111111\ngame %s\n' "$WROOT" "$WROOT" "$GROOT" > "$T/roots"
+KROOT=ba1e8f5947e7905ada6e7eaf2862a99092746874   # kefa's real root commit (read from its clone, 2026-10-21)
+printf 'standards %s\nexchange %s\nhub 1111111111111111111111111111111111111111\ngame %s\nkefa %s\n' "$WROOT" "$WROOT" "$GROOT" "$KROOT" > "$T/roots"
 printf 'game %s\n' "$WROOT" > "$T/roots-game"   # a fixture whose game row is this checkout's root (and no other row)
+printf 'kefa %s\n' "$WROOT" > "$T/roots-kefa"   # a fixture whose kefa row is this checkout's root (and no other row)
 G="$T/ephremdeme-game.git"; git init -q --bare -b main "$G"
+K="$T/ephremdeme-kefa.git"; git init -q --bare -b main "$K"
 PUSH_BRANCH_ROOTS_FILE="$T/roots"; export PUSH_BRANCH_ROOTS_FILE
 commit_on(){ # commit_on <branch> <start> <file>: one commit on <branch> (created at <start> when new); W stays on main, clean
   if git -C "$W" rev-parse -q --verify "refs/heads/$1" >/dev/null; then git -C "$W" switch -q "$1"; else git -C "$W" switch -q -c "$1" "$2"; fi
@@ -59,7 +62,7 @@ mkdir "$W/sub"
 refused "a subdirectory, not the top level" "$W/sub is not the top level of a git repository\$" "$W/sub" opus/new
 commit_on opus/new main n1
 git -C "$W" remote set-url origin git@github.com:someoneelse/standards.git
-refused "origin owned by someone else" 'origin URL git@github\.com:someoneelse/standards\.git is not github\.com/ephremdeme/\{exchange,standards,game,hub\}$' "$W" opus/new
+refused "origin owned by someone else" 'origin URL git@github\.com:someoneelse/standards\.git is not github\.com/ephremdeme/\{exchange,standards,game,hub,kefa\}$' "$W" opus/new
 git -C "$W" remote set-url origin https://github.com/ephremdeme/payments.git
 refused "origin an unlisted ephremdeme repository" 'origin URL https://github\.com/ephremdeme/payments\.git is not github' "$W" opus/new
 git -C "$W" remote set-url origin "$U"; git -C "$W" config remote.origin.pushurl git@github.com:someoneelse/standards.git
@@ -79,11 +82,17 @@ refused "a checkout not from game's root whose origin says ephremdeme/game" "opu
 check_ "control: ... the game repository got nothing" '[ -z "$(git -C "$G" for-each-ref)" ]'
 want "a checkout from the game row's root is pushed to ephremdeme/game (fixture game row = this root)" 0 "^push-branch: OK opus/new $(git -C "$W" rev-parse opus/new)\$" env PUSH_BRANCH_ROOTS_FILE="$T/roots-game" sh "$PB" "$W" opus/new
 check_ "... origin game has it at the local tip" '[ "$(remote_ref refs/heads/opus/new "$G")" = "$(git -C "$W" rev-parse opus/new)" ]'
+git -C "$W" remote set-url origin git@github.com:ephremdeme/kefa.git
+refused "a checkout not from kefa's root whose origin says ephremdeme/kefa" "opus/new does not descend from the root commit of ephremdeme/kefa \\($KROOT\\)\$" "$W" opus/new
+check_ "control: ... the kefa repository got nothing" '[ -z "$(git -C "$K" for-each-ref)" ]'
+want "a checkout from the kefa row's root is pushed to ephremdeme/kefa (fixture kefa row = this root)" 0 "^push-branch: OK opus/new $(git -C "$W" rev-parse opus/new)\$" env PUSH_BRANCH_ROOTS_FILE="$T/roots-kefa" sh "$PB" "$W" opus/new
+check_ "... origin kefa has it at the local tip" '[ "$(remote_ref refs/heads/opus/new "$K")" = "$(git -C "$W" rev-parse opus/new)" ]'
 git -C "$W" remote set-url origin git@github.com:ephremdeme/hub.git
 want "control: a repository whose root commit is not in the table (fixture without a hub row) -> refused" 2 '^push-branch: refused — the root commit of ephremdeme/hub is unknown here; push hub from its own session$' env PUSH_BRANCH_ROOTS_FILE="$T/roots-game" sh "$PB" "$W" opus/new
 # The one case on the REAL table (PUSH_BRANCH_ROOTS_FILE unset): roots() alone, extracted from the script, never pushes.
 roots_fn=$(awk '/^roots\(\) \{/,/^}$/' "$PB")
 check_ "the real table: roots game prints exactly game's root commit $GROOT" '[ "$(env -u PUSH_BRANCH_ROOTS_FILE sh -c "$roots_fn; roots game" 2>&1)" = "$GROOT" ]'
+check_ "the real table: roots kefa prints exactly kefa's root commit $KROOT" '[ "$(env -u PUSH_BRANCH_ROOTS_FILE sh -c "$roots_fn; roots kefa" 2>&1)" = "$KROOT" ]'
 git -C "$W" remote set-url origin "$U"
 git -C "$W" replace "$(git -C "$W" rev-parse opus/new)" "$(git -C "$W" rev-parse main)"
 refused "a replace ref" "$W has replace refs \(refs/replace/[0-9a-f]{40}\)\$" "$W" opus/new

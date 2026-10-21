@@ -98,12 +98,12 @@ mk(){ # mk [head branch]: a fresh $G in which every gate passes for PR head $H o
   content review "$(printf 'Milestone review of e9, a longer first line so that the base64 text wraps over several lines\ncodex-last-read: %s\n' "$X")"
   content decisions "$(printf '# Decisions\n- D-090 | 2026-10-06 | a recorded residual | r | t\n')"
   compare ahead "$RV"; }
-EX=ephremdeme/exchange; GA=ephremdeme/game; MS="--milestone e9"; LB=opus/x
+EX=ephremdeme/exchange; GA=ephremdeme/game; KE=ephremdeme/kefa; MS="--milestone e9"; LB=opus/x
 # Rule 1: arguments.
 H8=$(printf '%s' "$H" | cut -c1-8)
 mk; refused "a short SHA" "$H8 is not a full 40-character lowercase hex SHA\$" $EX 12 "$H8"
 mk; refused "an upper-case SHA" "[0-9A-F]{40} is not a full 40-character lowercase hex SHA\$" $EX 12 "$(printf '%s' "$H" | tr a-f A-F)"
-mk; refused "a foreign owner" 'someone/exchange is not ephremdeme/\{exchange,standards,game\}$' someone/exchange 12 "$H"
+mk; refused "a foreign owner" 'someone/exchange is not ephremdeme/\{exchange,standards,game,kefa\}$' someone/exchange 12 "$H"
 mk; refused "an unlisted ephremdeme repository" 'ephremdeme/payments is not ephremdeme/' ephremdeme/payments 12 "$H"
 mk; refused "hub (no CI)" 'ephremdeme/hub has no CI; merge-pr does not merge its PRs$' ephremdeme/hub 12 "$H"
 mk; refused "a PR number that is not a number" '12x is not a PR number$' $EX 12x "$H"
@@ -172,7 +172,7 @@ glog(){ printf '%s\n' "$@" > "$LL"; }   # glog <line>...: the local gate log, ex
 nochecks(){ # a read of the check runs, the commit status or the nightly runs fails loudly
   echo 'HTTP 599: check runs must not be read' > "$G/checks.err"; echo 'HTTP 599: the status must not be read' > "$G/status.err"
   echo 'HTTP 599: nightly runs must not be read' > "$G/nightly.err"; }
-mk $LB; glog 'check: OK' "$V9" "$GHL"; refused "--local-log on standards" '--local-log applies to ephremdeme/exchange and ephremdeme/game only \(ephremdeme/standards uses --smoke-log\)$' $ST 9 "$H" --local-log "$LL"
+mk $LB; glog 'check: OK' "$V9" "$GHL"; refused "--local-log on standards" '--local-log applies to ephremdeme/\{exchange,game,kefa\} only \(ephremdeme/standards uses --smoke-log\)$' $ST 9 "$H" --local-log "$LL"
 mk $LB; printf 'PASS    a\nsmoke-head: %s\n' "$H" > "$SL"
 refused "--local-log together with --smoke-log (exchange)" '--local-log and --smoke-log cannot be given together$' $EX 12 "$H" --local-log "$LL" --smoke-log "$SL"
 refused "--smoke-log together with --local-log (standards)" '--local-log and --smoke-log cannot be given together$' $ST 9 "$H" --smoke-log "$SL" --local-log "$LL"
@@ -292,6 +292,19 @@ check_ "... merged without reading the check runs or the commit status" '[ -e "$
 mk $LB; pr OPEN false "$H" main $LB false 1; nochecks; greenlog
 merged "a lane PR on game with a green local gate log" "merge-pr: OK $GA#12 $H merged" $GA 12 "$H" --local-log "$LL"
 check_ "... merged without reading the check runs or the commit status" '[ -e "$G/merge" ] && ! grep -q -e check-runs -e /status "$G/calls"'
+# kefa (no GitHub Actions): the local gate log only; never the pinned rust / ... check runs.
+mk $LB; pr OPEN false "$H" main $LB false 1
+refused "a lane PR on kefa without --local-log" 'ephremdeme/kefa has no PR CI: --local-log <path> is required$' $KE 12 "$H"
+check_ "... no merge happened and no check runs were read" '[ ! -e "$G/merge" ] && ! grep -q -e check-runs -e /status "$G/calls"'
+mk $LB; printf 'PASS    a\nsmoke-head: %s\n' "$H" > "$SL"
+refused "a lane PR on kefa with --smoke-log" '--smoke-log applies to ephremdeme/standards only$' $KE 12 "$H" --smoke-log "$SL"
+mk $LB; pr OPEN false "$H" main $LB false 1; nochecks; greenlog
+merged "a lane PR on kefa with a green local gate log" "merge-pr: OK $KE#12 $H merged" $KE 12 "$H" --local-log "$LL"
+check_ "... merged without reading the check runs or the commit status" '[ -e "$G/merge" ] && ! grep -q -e check-runs -e /status "$G/calls"'
+mk integration/k1; compare ahead docs/md-reports/k1-milestone-review.md; nochecks
+glog 'check: OK' 'verify:k1 — 5 ok, 0 failed' "$GHL" "$GT" 'gate-verdict: green k1'
+merged "a kefa milestone merge (k1) with a local gate log" "merge-pr: OK $KE#12 $H merged milestone k1" $KE 12 "$H" --milestone k1 --local-log "$LL"
+check_ "... the review file read is k1's" 'grep -Fqx "api repos/$KE/contents/docs/md-reports/k1-milestone-review.md?ref=$H" "$G/calls"'
 mk $LB; pr OPEN false "$H" main $LB false 1; nochecks; glog 'check: OK' 'verify:m2_2 — 5 ok, 0 failed' "$GHL" "$GT" 'gate-verdict: green m2_2'
 merged "a lane PR on game whose gate is m2_2 (an id with _)" "merge-pr: OK $GA#12 $H merged" $GA 12 "$H" --local-log "$LL"
 mk; nochecks; greenlog; merged "a milestone merge with a local gate log" "merge-pr: OK $EX#12 $H merged milestone e9" $EX 12 "$H" $MS --local-log "$LL"
