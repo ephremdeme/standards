@@ -32,7 +32,7 @@ GIT_NO_REPLACE_OBJECTS=1; export GIT_NO_REPLACE_OBJECTS
 refuse() { echo "push-branch: refused — $1" >&2; exit 2; }
 [ $# -eq 2 ] || { echo "push-branch: usage: push-branch <repo-dir> <ref>" >&2; exit 2; }
 dir=$1; ref=$2
-roots() { # roots <name>: the root commit of ephremdeme/<name> (read from the founders' checkouts on 2026-10-06)
+roots() { # roots <name>: the root commit of ephremdeme/<name> (read from the founders' checkouts on 2026-10-06; kefa read from its clone on 2026-10-21)
   if [ -n "${PUSH_BRANCH_ROOTS_FILE:-}" ]; then
     echo "push-branch: WARN — root commits read from PUSH_BRANCH_ROOTS_FILE=$PUSH_BRANCH_ROOTS_FILE (tests only; never set for an agent)" >&2
     [ -f "$PUSH_BRANCH_ROOTS_FILE" ] && [ -r "$PUSH_BRANCH_ROOTS_FILE" ] || return 1
@@ -43,6 +43,7 @@ roots() { # roots <name>: the root commit of ephremdeme/<name> (read from the fo
     standards) echo 4e78d67036ddafaa07c9dac9bb74249c4dd2e895;;
     hub) echo 75422b757cdc5cc37efb54035fac7aeea17da33e;;
     game) echo 5b469d2caa001c168e63498d32ad7637fee837f9;;
+    kefa) echo ba1e8f5947e7905ada6e7eaf2862a99092746874;;
     *) ;;
   esac
 }
@@ -58,7 +59,7 @@ shallow=$(g rev-parse --is-shallow-repository 2>/dev/null) || refuse "git rev-pa
 case "$shallow" in false) ;; true) refuse "$abs is a shallow clone";; *) refuse "git rev-parse --is-shallow-repository said '$shallow'";; esac
 repl=$(g for-each-ref --format='%(refname)' refs/replace/) || refuse "git for-each-ref refs/replace failed in $abs"
 [ -z "$repl" ] || refuse "$abs has replace refs ($(printf '%s\n' "$repl" | head -n 1))"
-repo_name() { # repo_name <url>: prints exchange|standards|game|hub for an ephremdeme GitHub URL, fails otherwise
+repo_name() { # repo_name <url>: prints exchange|standards|game|hub|kefa for an ephremdeme GitHub URL, fails otherwise
   case "$1" in
     https://github.com/ephremdeme/*) n=${1#https://github.com/ephremdeme/};;
     git@github.com:ephremdeme/*) n=${1#git@github.com:ephremdeme/};;
@@ -66,7 +67,7 @@ repo_name() { # repo_name <url>: prints exchange|standards|game|hub for an ephre
     *) return 1;;
   esac
   n=${n%.git}
-  case "$n" in exchange|standards|game|hub) printf '%s\n' "$n";; *) return 1;; esac
+  case "$n" in exchange|standards|game|hub|kefa) printf '%s\n' "$n";; *) return 1;; esac
 }
 check_urls() { # check_urls <label> <urls>: every line names the same ephremdeme repository; sets name
   [ -n "$2" ] || refuse "origin has no $1 in $abs"
@@ -74,7 +75,7 @@ check_urls() { # check_urls <label> <urls>: every line names the same ephremdeme
   old_ifs=$IFS; IFS='
 '; set -f
   for u in $2; do
-    un=$(repo_name "$u") || refuse "origin $1 $u is not github.com/ephremdeme/{exchange,standards,game,hub}"
+    un=$(repo_name "$u") || refuse "origin $1 $u is not github.com/ephremdeme/{exchange,standards,game,hub,kefa}"
     [ -z "$name" ] || [ "$un" = "$name" ] || refuse "origin $1 $u is not github.com/ephremdeme/$name"
     name=$un
   done

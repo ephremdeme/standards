@@ -5,9 +5,9 @@
 # with `gh pr merge <pr> --repo <r> --merge --match-head-commit <sha>`, so GitHub refuses if the head moved after the
 # checks below. Every fact except the integrator-attested --smoke-log/--local-log file is read from GitHub at the exact
 # SHA (no local checkout is trusted). Refused (exit 2, "merge-pr: refused — <reason>") unless ALL hold:
-#  1. <full-head-sha> is 40 lowercase hex; <owner/repo> is ephremdeme/{exchange,standards,game} (ephremdeme/hub has no
-#     CI and is refused); <pr> is a number; --smoke-log only for standards, --local-log only for exchange and game,
-#     never both.
+#  1. <full-head-sha> is 40 lowercase hex; <owner/repo> is ephremdeme/{exchange,standards,game,kefa} (ephremdeme/hub
+#     has no CI and is refused; ephremdeme/kefa has no PR CI and merges on --local-log only, refused without it);
+#     <pr> is a number; --smoke-log only for standards, --local-log only for exchange, game and kefa, never both.
 #  2. gh pr view: state OPEN, not a draft, not from another repository (isCrossRepository), headRefOid = <sha>,
 #     baseRefName = main. A head branch integration/<mN> requires --milestone <mN>; --milestone requires that branch.
 #  3. Check runs on that exact SHA (gh api --paginate .../commits/<sha>/check-runs; every page read, the count equal to
@@ -77,13 +77,14 @@ done
 case "$sha" in *[!0-9a-f]*|'') refuse "$sha is not a full 40-character lowercase hex SHA";; esac
 [ ${#sha} -eq 40 ] || refuse "$sha is not a full 40-character lowercase hex SHA"
 [ "$r" != ephremdeme/hub ] || refuse "ephremdeme/hub has no CI; merge-pr does not merge its PRs"
-case "$r" in ephremdeme/exchange|ephremdeme/standards|ephremdeme/game) ;; *) refuse "$r is not ephremdeme/{exchange,standards,game}";; esac
+case "$r" in ephremdeme/exchange|ephremdeme/standards|ephremdeme/game|ephremdeme/kefa) ;; *) refuse "$r is not ephremdeme/{exchange,standards,game,kefa}";; esac
 case "$pr" in ''|0*|*[!0-9]*) refuse "$pr is not a PR number";; esac
 [ $resid_set -eq 0 ] || [ $ms_set -eq 1 ] || refuse "--residual applies to milestone PRs only"
 [ $smoke_set -eq 0 ] || [ $llog_set -eq 0 ] || refuse "--local-log and --smoke-log cannot be given together"
 [ $smoke_set -eq 0 ] || [ "$r" = ephremdeme/standards ] || refuse "--smoke-log applies to ephremdeme/standards only"
 [ $llog_set -eq 0 ] || [ "$r" != ephremdeme/standards ] \
-  || refuse "--local-log applies to ephremdeme/exchange and ephremdeme/game only (ephremdeme/standards uses --smoke-log)"
+  || refuse "--local-log applies to ephremdeme/{exchange,game,kefa} only (ephremdeme/standards uses --smoke-log)"
+[ "$r" != ephremdeme/kefa ] || [ $llog_set -eq 1 ] || refuse "ephremdeme/kefa has no PR CI: --local-log <path> is required"
 if [ $ms_set -eq 1 ]; then
   # A lowercase letter first; no digit is required (exchange gp, 2026-10-20: local-gate accepts digit-less ids).
   case "$ms" in [a-z]*) ;; *) refuse "$ms is not a milestone id";; esac
@@ -138,7 +139,7 @@ case "$hb" in
   *) [ $ms_set -eq 0 ] || refuse "--milestone $ms does not match the head branch $hb (integration/$ms expected)";;
 esac
 # 3. Checks on the exact SHA (pinned names per repository), or the standards smoke log, then the legacy status; or the
-# local gate log alone (exchange, game).
+# local gate log alone (exchange, game, kefa).
 if [ "$r" = ephremdeme/standards ]; then
   [ $smoke_set -eq 1 ] || refuse "ephremdeme/standards has no PR CI: --smoke-log <path> is required"
   [ -f "$smoke" ] && [ -r "$smoke" ] || refuse "smoke log $smoke is not a readable file"
