@@ -102,6 +102,19 @@ printf '# e9 review\ncodex-last-read: %s\n' "$C2" > "$V/docs/md-reports/e9-miles
 prj "$(git -C "$V" rev-parse HEAD)" $LABELS
 want "control codex: an untracked review file (merge-pr reads it at the sha) -> FAIL codex" 1 '^close-check: FAIL codex — docs/md-reports/e9-milestone-review.md is not a file committed at HEAD$' sh "$CC" "$V" e9 7
 check_ "control codex (untracked): only the codex row fails" 'printf "%s\n" "$out" | tail -n 1 | grep -qx "close-check: FAILED (1 of 6 rows)"'
+# Exchange D-388 (2026-10-24, "Remove the ceremonials and make the whole process leaner"), as merge-pr rule 5b: after
+# codex-last-read only docs/**, NOTES.md, DECISIONS.md and BACKLOG.md at the root may change; both sides of a rename.
+mk codex-docs; X=$(git -C "$V" rev-parse HEAD); echo d > "$V/docs/data-inventory.md"; echo n > "$V/NOTES.md"; echo d > "$V/DECISIONS.md"; echo b > "$V/BACKLOG.md"; cm docs
+printf '# e9 review\ncodex-last-read: %s\n' "$X" > "$V/docs/md-reports/e9-milestone-review.md"; cm review; prj "$(git -C "$V" rev-parse HEAD)" $LABELS
+want "codex: docs/**, NOTES.md, DECISIONS.md and BACKLOG.md changed since codex-last-read -> OK (D-388)" 0 '^close-check: OK \(6 rows\)$' sh "$CC" "$V" e9 7
+check_ "... the codex row passed with codex-last-read two commits back" '[ "$(git -C "$V" rev-parse HEAD~2)" = "$X" ] && printf "%s\n" "$out" | grep -qx "close-check: PASS codex"'
+mk codex-bak; X=$(git -C "$V" rev-parse HEAD); echo n > "$V/NOTES.md.bak"; echo n > "$V/NOTES.md"; cm bak
+printf '# e9 review\ncodex-last-read: %s\n' "$X" > "$V/docs/md-reports/e9-milestone-review.md"; cm review; prj "$(git -C "$V" rev-parse HEAD)" $LABELS
+want "control codex: NOTES.md.bak changed since codex-last-read -> FAIL codex naming it" 1 "^close-check: FAIL codex — changed since codex-last-read $X: NOTES\.md\.bak\$" sh "$CC" "$V" e9 7
+mk codex-rename; mkdir -p "$V/internal"; echo y > "$V/internal/y.go"; cm pre; X=$(git -C "$V" rev-parse HEAD); git -C "$V" mv internal/y.go docs/y.md; cm mv
+printf '# e9 review\ncodex-last-read: %s\n' "$X" > "$V/docs/md-reports/e9-milestone-review.md"; cm review; prj "$(git -C "$V" rev-parse HEAD)" $LABELS
+want "control codex: internal/y.go renamed to docs/y.md since codex-last-read -> FAIL codex naming internal/y.go" 1 "^close-check: FAIL codex — changed since codex-last-read $X: internal/y\.go\$" sh "$CC" "$V" e9 7
+check_ "control codex (rename): only the codex row fails" 'printf "%s\n" "$out" | tail -n 1 | grep -qx "close-check: FAILED (1 of 6 rows)"'
 # mutants
 mk surv; printf '# e9 mutants\nrun: %s files: ledger/src/x.rs tested: 5 missed: 0 caught: 4 unviable: 1 timeout: 0\nopen survivors: 1\n' "$C1" > "$V/docs/md-reports/e9-mutants.md"; cm surv; rv
 want "control mutants: open survivors: 1 last -> FAIL mutants" 1 "^close-check: FAIL mutants — last line is 'open survivors: 1', not 'open survivors: 0'\$" sh "$CC" "$V" e9 7
