@@ -1,4 +1,5 @@
-# Dispatch brief (send verbatim, fill the three paths)
+# Dispatch brief (send verbatim, fill the paths; change the budget only when the TASK needs another number)
+Budget: at most 50 tool calls (docs/07 §1).
 Your worktree EXISTS at <ABS_WORKTREE>. Do not call EnterWorktree or any tool that creates worktrees. Use absolute paths and `git -C <ABS_WORKTREE>`.
 First: `git -C <ABS_WORKTREE> branch --show-current` must equal the `Branch:` line of <ABS_WORKTREE>/TASK.md — if not, STOP and report.
 Read only TASK.md and the files it lists, from this worktree (standards/ is the pinned in-repo copy). Never read another checkout.
