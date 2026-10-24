@@ -19,7 +19,9 @@
 #   path or a tree is "FAIL <row> — <file> is not a file committed at HEAD".
 #   codex    docs/md-reports/<mN>-milestone-review.md holds exactly one line starting "codex-last-read:", which is
 #            "codex-last-read: <X>" (40 lowercase hex); PASS when X = HEAD, or X is a commit, an ancestor of HEAD, and
-#            `git diff --name-only X HEAD` lists nothing but that review file.
+#            every path `git diff --name-only --no-renames X HEAD` lists (so both sides of a rename) is under docs/
+#            (the review file among them) or NOTES.md, DECISIONS.md or BACKLOG.md at the root, none with ".." or a
+#            leading "/" (exchange D-388, as merge-pr rule 5b); else FAIL naming the first other path.
 #   mutants  docs/md-reports/<mN>-mutants.md exists; its last non-empty line is exactly "open survivors: 0"; every line
 #            starting "run:" matches ^run: [0-9a-f]{7,40} files: .+ tested: N missed: N caught: N unviable: N timeout: N$
 #            (a malformed run: line is a FAIL, never skipped; at least one run: line is required); for each, tested =
@@ -152,7 +154,9 @@ row_codex() {
   g cat-file -e "$x^{commit}" 2>/dev/null || { fail codex "codex-last-read $x is not a commit here"; return; }
   g merge-base --is-ancestor "$x" "$head" 2>/dev/null || { fail codex "codex-last-read $x is not an ancestor of HEAD"; return; }
   ch=$(g diff --name-only --no-renames "$x" "$head" 2>/dev/null) || { fail codex "git diff $x HEAD failed"; return; }
-  other=$(printf '%s\n' "$ch" | grep -Fvx -e "$rel" -e '' | head -n 1)
+  # D-388, as merge-pr 5b: only docs/**, NOTES.md, DECISIONS.md and BACKLOG.md; a path with .. or a leading / never.
+  other=$(printf '%s\n' "$ch" | grep -E -e '\.\.' -e '^/' | head -n 1)
+  [ -n "$other" ] || other=$(printf '%s\n' "$ch" | grep -Evx -e '' -e 'docs/.*' -e 'NOTES\.md' -e 'DECISIONS\.md' -e 'BACKLOG\.md' | head -n 1)
   [ -z "$other" ] || { fail codex "changed since codex-last-read $x: $other"; return; }
   pass codex
 }
