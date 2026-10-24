@@ -246,10 +246,23 @@ mk; printf '{"type":"file","encoding":"none","content":""}\n' > "$G/review.json"
 mk; content review "Milestone review without the line"; refused "codex-last-read missing" "$RV at $H has no codex-last-read line\$" $EX 12 "$H" $MS
 mk; content review "$(printf 'codex-last-read: %s\n' "$Y")"; compare diverged "$RV" other.txt
 refused "codex-last-read a different SHA (not an ancestor)" "codex-last-read $Y is not $H or an ancestor of it \(compare: diverged\)\$" $EX 12 "$H" $MS
-mk; compare ahead "$RV" code.rs; refused "code changed after codex-last-read" "commits after codex-last-read $X change code\.rs \(only $RV may change\)\$" $EX 12 "$H" $MS
+OA=' \(only docs/\*\*, NOTES\.md, DECISIONS\.md and BACKLOG\.md may change\)$'   # exchange D-388: docs may follow the read
+mk; compare ahead "$RV" code.rs; refused "code changed after codex-last-read" "commits after codex-last-read $X change code\.rs$OA" $EX 12 "$H" $MS
 mk; i=0; set --; while [ $i -lt 300 ]; do i=$((i + 1)); set -- "$@" "$RV"; done; compare ahead "$@"; set --
 refused "a compare reply of 300 files (possibly truncated)" "compare $X\.\.\.$H lists 300 files \(possibly truncated\)\$" $EX 12 "$H" $MS
 mk; echo 'HTTP 404: No common ancestor' > "$G/compare.err"; refused "the compare API failing" 'gh api compare failed: HTTP 404: No common ancestor$' $EX 12 "$H" $MS
+# Exchange D-388 (2026-10-24, "make the whole process leaner"): the cross-model read need not follow the last docs
+# commit. After codex-last-read the compare may list docs/** (the review file among them), NOTES.md, DECISIONS.md and
+# BACKLOG.md at the root; any other path, a path with .. or a leading /, and either side of a rename is refused.
+mk; compare ahead docs/data-inventory.md NOTES.md DECISIONS.md BACKLOG.md
+merged "docs/**, NOTES.md, DECISIONS.md and BACKLOG.md after codex-last-read" "merge-pr: OK $EX#12 $H merged milestone e9" $EX 12 "$H" $MS
+check_ "... the compare from codex-last-read to the head was read" 'grep -Fqx "api repos/$EX/compare/$X...$H" "$G/calls"'
+mk; compare ahead "$RV" docs/data-inventory.md internal/x.go; refused "Go code after codex-last-read beside docs" "commits after codex-last-read $X change internal/x\.go$OA" $EX 12 "$H" $MS
+mk; compare ahead "$RV" docs/../internal/x.go; refused "a path that only looks like docs/ (docs/../internal/x.go)" "commits after codex-last-read $X change docs/\.\./internal/x\.go$OA" $EX 12 "$H" $MS
+mk; compare ahead "$RV" /docs/x.md; refused "a docs path with a leading /" "commits after codex-last-read $X change /docs/x\.md$OA" $EX 12 "$H" $MS
+mk; compare ahead "$RV" NOTES.md.bak; refused "a root file that only starts like NOTES.md (NOTES.md.bak)" "commits after codex-last-read $X change NOTES\.md\.bak$OA" $EX 12 "$H" $MS
+mk; printf '{"status":"ahead","ahead_by":1,"total_commits":1,"files":[{"filename":"%s","status":"modified"},{"filename":"docs/y.md","previous_filename":"internal/y.go","status":"renamed"}]}\n' "$RV" > "$G/compare.json"
+refused "code renamed into docs/ after codex-last-read (previous_filename internal/y.go)" "commits after codex-last-read $X change internal/y\.go$OA" $EX 12 "$H" $MS
 mk; pr OPEN false "$H" main $IB false 1 human-gate-accepted; refused "founder-approved missing on a milestone PR" "label founder-approved is not on PR #12 \(required: milestone branch $IB\)\$" $EX 12 "$H" $MS
 mk; activity $IB "$H" 2026-10-06T12:10:00Z
 refused "founder-approved added before the last push" "label founder-approved was last added at 2026-10-06T12:00:00Z, not after the last push of $IB at 2026-10-06T12:10:00Z\$" $EX 12 "$H" $MS
