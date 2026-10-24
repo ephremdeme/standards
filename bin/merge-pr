@@ -44,9 +44,11 @@
 #        "gate-verdict: green <mN>" (so its passing "verify:<mN> — N ok, 0 failed" line too), so the same log is the
 #        full-chain evidence;
 #     b. docs/md-reports/<mN>-milestone-review.md at <sha> (contents API, base64) carries "codex-last-read: <X>" (one
-#        value, 40 hex) where X = <sha>, or GitHub's compare X...<sha> is "ahead" and lists only that review file (a
-#        commit cannot contain its own SHA, so the commit recording Codex's review is the one change allowed after X);
-#        300 or more listed files are treated as truncated;
+#        value, 40 hex) where X = <sha>, or GitHub's compare X...<sha> is "ahead" (or "identical") and every file it
+#        lists, a rename's previous name too, is a path under docs/ (the review file among them) or NOTES.md,
+#        DECISIONS.md or BACKLOG.md at the root, with no ".." anywhere and no leading "/" (exchange D-388, 2026-10-24:
+#        the cross-model read need not follow the last docs commit; code, tests, scripts, migrations, deploy and every
+#        other root file changed after X are refused by name); 300 or more listed files are treated as truncated;
 #     c. founder-approved as in 4;
 #     d. the human gate: --residual D-NNN with a line starting "- D-NNN |" in DECISIONS.md at <sha> (contents API), or
 #        else the label human-gate-accepted under the timing rule of 4.
@@ -267,7 +269,8 @@ if [ $ms_set -eq 1 ]; then
     done
     [ $chain_ok -eq 1 ] || refuse "no nightly.yml run on $sha has every chain job concluded success ($seen)"
   fi
-  # b. Codex's last read is the head, or the head is only its review report on top of what Codex read.
+  # b. Codex's last read is the head, or every change on top of what Codex read is docs/** or the root NOTES.md,
+  # DECISIONS.md, BACKLOG.md (D-388); a path with .. or a leading / is never one of them.
   rv="docs/md-reports/$ms-milestone-review.md"
   gh_content "$rv" "$tmp/review"
   reads=$(grep -- '^codex-last-read:' "$tmp/review"); [ $? -le 1 ] || refuse "$rv at $sha could not be read"
@@ -279,17 +282,19 @@ if [ $ms_set -eq 1 ]; then
   [ ${#xr} -eq 40 ] || refuse "$rv at $sha: codex-last-read is not a full SHA"
   if [ "$xr" != "$sha" ]; then
     gh_read "gh api compare" "$tmp/compare.json" api "repos/$r/compare/$xr...$sha"
-    cmp=$(jq -r --arg rv "$rv" 'if type != "object" or (.status | type) != "string" or (.files | type) != "array" or any(.files[]; type != "object" or (.filename | type) != "string") then "unreadable"
+    cmp=$(jq -r 'def docs_only: type == "string" and (contains("..") | not) and (startswith("/") | not)
+          and (startswith("docs/") or . == "NOTES.md" or . == "DECISIONS.md" or . == "BACKLOG.md");
+        if type != "object" or (.status | type) != "string" or (.files | type) != "array" or any(.files[]; type != "object" or (.filename | type) != "string") then "unreadable"
         elif (.status == "ahead" or .status == "identical") | not then "status\t\(.status)"
         elif (.files | length) >= 300 then "truncated\t\(.files | length)"
-        else (first(.files[] | (.filename, (.previous_filename // empty)) | select(. != $rv) | "extra\t\(.)") // "ok") end' \
+        else (first(.files[] | (.filename, (.previous_filename // empty)) | select(docs_only | not) | "extra\t\(.)") // "ok") end' \
         "$tmp/compare.json" 2>/dev/null) || cmp=unreadable
     c2=$(printf '%s\n' "$cmp" | cut -f2)
     case "$cmp" in
       ok) ;;
       status*) refuse "codex-last-read $xr is not $sha or an ancestor of it (compare: $c2)";;
       truncated*) refuse "compare $xr...$sha lists $c2 files (possibly truncated)";;
-      extra*) refuse "commits after codex-last-read $xr change $c2 (only $rv may change)";;
+      extra*) refuse "commits after codex-last-read $xr change $c2 (only docs/**, NOTES.md, DECISIONS.md and BACKLOG.md may change)";;
       *) refuse "compare $xr...$sha: unreadable JSON";;
     esac
   fi
