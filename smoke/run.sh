@@ -266,7 +266,7 @@ mkdir "$T/review-R9"; echo keep > "$T/review-R9/keep"; D9=$("$RC" "$T/game" "$BA
 "$RC" "$T/game" "$BASE" "$HEADSHA" 'x/../y' >$T/o 2>&1; rc=$?
 [ $rc -eq 2 ] && grep -q 'review-checkout: invalid id' $T/o && ok "review-checkout refuses an id outside [A-Za-z0-9_.-] (exit 2)" || { bad "review-checkout id validation (rc=$rc)"; cat $T/o; }
 expect_ok "review-verify-clean accepts a relative path to an untouched checkout" "cd $T && $RV ${D9##*/} | grep -q 'review checkout clean (HEAD $HEADSHA)'"
-for f in reviewer.md reviewer-lite.md; do
+for f in reviewer.md; do
   grep -q '^tools: Read, Glob, Grep$' "$H/agents/$f" && ok "$f has read-only tools (no Bash/Edit/Write)" || bad "$f tools not read-only"; done
 
 # --- 5b. DeepSeek dispatch (no network call: dry runs, or a stub `claude` first on PATH) ----------

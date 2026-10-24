@@ -22,7 +22,7 @@ Tags: <none — or a comma-separated list from: sql authz privacy input crypto d
 - Standing rules from past reviews (docs/06 "Never"): take row locks fixture → question, never the reverse; every error path fails closed (a failed command, an empty read or a missing file is a refusal, never a pass); validate every value read from config, env or a request before use; a control is red for its own reason (its own assertion message, not just a failed count); `.env` is data, never sourced; risk is judged by what a path does, never by where it sits.
 
 ## 5. Verify (three cycles: red batch of the new tests, green batch, controls; then once each at the end — report one line per command)
-- standards/bin/check --only <kind>   (<kind> = `standards/bin/owned-paths --kind TASK.md`: web, rust or all)
+- standards/bin/check --only <kind>   (<kind> = `standards/bin/owned-paths --kind TASK.md`: web, rust or all; a lane in a Go module (`go.mod` at the top): go)
 - scripts/verify/mN.sh --section <lane>   (must go green; the integrator runs every other section at merge)
 - <control test name(s) — database guards only — expected red with this assertion message: "…">
 

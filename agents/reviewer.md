@@ -1,6 +1,6 @@
 ---
 name: reviewer
-description: Adversarial review of HIGH-risk diffs (money, auth, migrations, security, CI) against TASK.md, standards/docs/05–06 and specs. Use for every HIGH-risk lane.
+description: Adversarial review of HIGH-risk diffs (money, auth, migrations, security, CI) against TASK.md, standards/docs/05–06 and specs. Use for every lane whose TASK §2 `Tags:` line is not `none` (D-088 item 4).
 tools: Read, Glob, Grep
 model: claude-opus-5-5
 ---
