@@ -302,14 +302,17 @@ fixture; { printf '%s\n' "panic: boom" "" "goroutine 1 [running]:" "example/aa.T
 c_mainpanic(){ gfail && in_fb "panic: boom" && in_fb "FAIL${TAB}example/aa${TAB}0.01s"; }
 judge "§7.11 failing block: TestMain panic: panic: boom and FAIL example/aa" c_mainpanic
 # §7.12 redaction: credentials in a panic: line (cut from the tail, kept by failing:) and in the tail
-fixture; { printf '%s\n' "panic: dial postgres://u:SENTINEL-PW@db:5432/x: connection refused (password=SENTINEL-PW2)"; zz
+# (password=<non-space> takes the whole non-space run, so the sentinel ends the panic line.)
+fixture; { printf '%s\n' "panic: dial postgres://u:SENTINEL-PW@db:5432/x: connection refused; password=SENTINEL-PW2"; zz
   printf '%s\n' "    db_test.go:20: dial postgres://u:SENTINEL-PW@db:5432/x: connection refused" \
-    "    db_test.go:21: password=SENTINEL-PW2 PGPASSWORD=SENTINEL-PW3 Password=SENTINEL-PW4"; } | gout; run
+    "    db_test.go:21: password=SENTINEL-PW2 PGPASSWORD=SENTINEL-PW3 Password=SENTINEL-PW4" \
+    "    db_test.go:22: retry postgres://u:p@SENTINEL-PW5@db/x via http://localhost:8080/api?email=a@b.c"; } | gout; run
 c_redact(){ gfail && ! grep -q SENTINEL "$T/out" \
-  && in_fb "panic: dial postgres://***@db:5432/x: connection refused (password=***)" \
+  && in_fb "panic: dial postgres://***@db:5432/x: connection refused; password=***" \
   && tb | grep -qxF "    db_test.go:20: dial postgres://***@db:5432/x: connection refused" \
   && tb | grep -qxF "    db_test.go:21: password=*** PGPASSWORD=*** Password=***" \
+  && tb | grep -qxF "    db_test.go:22: retry postgres://***@db/x via http://localhost:8080/api?email=a@b.c" \
   && tb | grep -qxF "ok  ${TAB}example/pkg/zz/p40${TAB}0.01s"; }
-judge "§7.12 redaction: no sentinel anywhere in check's output; ://***@ and password=*** in the tail and under failing:, other lines unchanged" c_redact
+judge "§7.12 redaction: no sentinel anywhere in check's output; ://***@ (to the last @) and password=*** in the tail and under failing:, a URL without credentials and other lines unchanged" c_redact
 
 rm -rf "$T"; [ $R -eq 0 ] && echo "check-go.t: all cases behave" || echo "check-go.t: FAILURES"; exit $R

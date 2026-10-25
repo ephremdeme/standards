@@ -8,12 +8,19 @@
 # repo's shared CARGO_TARGET_DIR (C5, bin/build-lock.sh); a lock held elsewhere after BUILD_LOCK_WAIT is BLOCKED rust.
 # A Go module (go.mod) runs make gen, the committed-output check, make lint and make test, without the build lock
 # (exchange D-158: Go's memory is small and its cache is per-user).
+# A failed step prints the last VERIFY_FAIL_TAIL lines of its output (default 15; local-gate exports 400; anything but
+# a positive integer is refused, exit 2), then its failing: block (step(), below); both print the output redacted.
 set -u
 usage() { echo "check: usage: check [--only rust|web|go|all]" >&2; exit 2; }
 only=all
 if [ $# -gt 0 ]; then
   [ $# -eq 2 ] && [ "$1" = "--only" ] || usage
   case "$2" in rust|web|go|all) only=$2;; *) usage;; esac
+fi
+fail_tail=${VERIFY_FAIL_TAIL:-15}
+case "$fail_tail" in 0*|*[!0-9]*) fail_tail=;; esac
+if [ -z "$fail_tail" ] || ! tail -n "$fail_tail" < /dev/null > /dev/null 2>&1; then
+  echo "check: VERIFY_FAIL_TAIL must be a positive integer, got '${VERIFY_FAIL_TAIL-}'" >&2; exit 2
 fi
 export NO_COLOR=1 FORCE_COLOR=0 CI=1
 # User-local toolchains (rustup, cargo-installed tools, gitleaks, gh) without touching the caller's shell profile.
@@ -24,8 +31,51 @@ if [ -z "${DATABASE_URL:-}" ] && [ -r .env ]; then
   v=$(sh "$(dirname "$0")/read-env" DATABASE_URL .env) && { DATABASE_URL=$v; export DATABASE_URL; }
 fi
 fail=0
+# Redaction (exchange E10 plan read R1-10), one sed over a failed step's output before the tail or failing: reads it:
+# "://<user>:<password>@" becomes "://***@" (the userinfo of a URL's authority, to its last @, as Go's url.Parse
+# splits it) and "password=<non-space>" in any case becomes "<key>=***" (so PGPASSWORD= too). Nothing else changes.
+# Bytes, not characters (LC_ALL=C), so an invalid UTF-8 byte cannot stop a match early.
+redact() { LC_ALL=C sed -e 's|://[^/?#@:[:space:]]*:[^/?#[:space:]]*@|://***@|g' \
+  -e 's|\([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]\)=[^[:space:]][^[:space:]]*|\1=***|g'; }
+# failing: (exchange BACKLOG 122, D-471; R1-09): `go test ./...` prints packages in import-path order, so a failing
+# cmd/, internal/api or internal/db never reached the tail. Every line of the whole output that names a failure, in
+# first-seen order, each once, blank lines never, indented, after a "failing:" line; at most 80, then "failing: <n>
+# lines (capped at 80)" when <n> > 80 matched; nothing at all when none did. Kept (ERE):
+#   ^[[:space:]]*--- FAIL          a Go test or subtest
+#   ^[[:space:]]*FAIL[[:space:]]   a package: Go's FAIL<tab><pkg>, nextest's "FAIL [", vitest's " FAIL " (not Go's bare
+#                                  FAIL line, not FAILED)
+#   ^panic:                        a panic; a TestMain or init panic is attributed by its package's FAIL line
+#   seed[=:]                       a replay seed, anywhere in the line
+#   \[(build|setup) failed\]       the line itself, and before the last such line the compiler diagnostics ^# (the
+#                                  package header) or \.go:[0-9]+:[0-9]+: , at most 20
+#   ^WARNING: DATA RACE            and the next 6 lines
+#   ^[[:space:]]*running tests:    right after a ^panic: test timed out line, then the indented test names after it,
+#                                  10 lines in all
+failing_block() { LC_ALL=C awk '
+  { l[NR] = $0 } /\[(build|setup) failed\]/ { bf = NR }
+  END {
+    for (i = 1; i <= NR; i++) { s = l[i]; k = 0
+      if (race > 0) { k = 1; race-- }
+      if (names > 0) { if (s ~ /^[[:space:]]+[^[:space:]]/) { k = 1; names-- } else names = 0 }
+      if (tmo) { tmo = 0; if (s ~ /^[[:space:]]*running tests:/) { k = 1; names = 9 } }
+      if (s ~ /^[[:space:]]*--- FAIL/ || s ~ /^[[:space:]]*FAIL[[:space:]]/ || s ~ /^panic:/ || s ~ /seed[=:]/ ||
+          s ~ /\[(build|setup) failed\]/) k = 1
+      if (s ~ /^WARNING: DATA RACE/) { k = 1; race = 6 }
+      if (s ~ /^panic: test timed out/) tmo = 1
+      if (i < bf && nd < 20 && (s ~ /^# / || s ~ /\.go:[0-9]+:[0-9]+: /) && !(s in seen)) { k = 1; nd++ }
+      if (!k || s ~ /^[[:space:]]*$/ || (s in seen)) continue
+      seen[s] = 1; if (++n <= 80) o[n] = s
+    }
+    if (n == 0) exit 0
+    print "failing:"; for (i = 1; i <= n && i <= 80; i++) print "      " o[i]
+    if (n > 80) print "failing: " n " lines (capped at 80)"
+  }'; }
 step() { name=$1; shift; out=$("$@" 2>&1); rc=$?
-  if [ $rc -eq 0 ]; then echo "PASS  $name"; else echo "FAIL  $name"; echo "$out" | tail -n 15 | sed 's/^/      /'; fail=1; fi; }
+  if [ $rc -eq 0 ]; then echo "PASS  $name"; return 0; fi
+  echo "FAIL  $name"; fail=1
+  out=$(printf '%s\n' "$out" | redact) || out="(the output is withheld: its redaction failed)"
+  printf '%s\n' "$out" | tail -n "$fail_tail" | sed 's/^/      /'
+  printf '%s\n' "$out" | failing_block; }
 need() { command -v "$1" >/dev/null 2>&1 || { echo "BLOCKED $2 (missing tool: $1)"; fail=1; return 1; }; }
 
 if [ "$only" = web ] || [ "$only" = go ]; then echo "SKIP  rust (--only $only)"
