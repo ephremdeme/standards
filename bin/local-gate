@@ -1,9 +1,11 @@
 #!/bin/sh
 # Usage: standards/bin/local-gate <repo-dir> <mN> <log>        (the integrator, on the dev machine; exchange D-109)
-# The local evidence gate that replaces GitHub-hosted CI. From the top of <repo-dir> it runs standards/bin/check under
-# the machine build lock (bin/with-build-lock), then the full chain `bash scripts/verify/<mN>.sh` (no --section; the
-# instrument takes the verify and build locks itself), with VERIFY_FAIL_TAIL=${VERIFY_FAIL_TAIL:-400} exported, both
-# outputs appended to the fresh file <log>. The log starts with `free -m` (memory, not disk, is the machine's limit:
+# The local evidence gate that replaces GitHub-hosted CI. From the top of <repo-dir> it runs standards/bin/check, under
+# the machine build lock (bin/with-build-lock) only when <repo-dir> has a Cargo.toml at the top; otherwise without it,
+# after the log line "gate-lock: none (no Cargo.toml)" (exchange D-471: a Go repo needs no lock, D-158, so its gate
+# never queues behind another repo's Rust build; check's own Rust steps take the lock themselves), then the full chain
+# `bash scripts/verify/<mN>.sh` (no --section; the instrument takes the verify and build locks itself), with
+# VERIFY_FAIL_TAIL=${VERIFY_FAIL_TAIL:-400} exported, both outputs appended to the fresh file <log>. The log starts with `free -m` (memory, not disk, is the machine's limit:
 # the exchange OOM history) and always ends, green or red, with "gate-head: <full SHA of HEAD at the start>", one
 # "gate-tree: clean" or "gate-tree: dirty (<first path>)" and one "gate-verdict: green <mN>" or "gate-verdict: red —
 # <first reason>", so a red log is evidence too. The verdict is decided before these lines are written, from the log
@@ -79,7 +81,12 @@ if [ -e "$log" ] || [ -L "$log" ]; then refuse "$log exists; the gate writes a f
 red() { echo "local-gate: RED $ms $head — $1 (log $log)" >&2; exit 1; }
 free -m >> "$log" 2>&1 || echo "local-gate: free -m failed (exit $?)" >> "$log"
 if [ "$override" = 1 ]; then printf 'gate-instrument: %s (override)\n' "$ms" >> "$log" || red "the log could not be written"; fi
-( cd "$dir" && sh "$here/with-build-lock" sh standards/bin/check ) < /dev/null >> "$log" 2>&1; crc=$?
+if [ -f "$dir/Cargo.toml" ]; then
+  ( cd "$dir" && sh "$here/with-build-lock" sh standards/bin/check ) < /dev/null >> "$log" 2>&1; crc=$?
+else
+  printf 'gate-lock: none (no Cargo.toml)\n' >> "$log" || red "the log could not be written"
+  ( cd "$dir" && sh standards/bin/check ) < /dev/null >> "$log" 2>&1; crc=$?
+fi
 ( cd "$dir" && bash "scripts/verify/$ms.sh" ) < /dev/null >> "$log" 2>&1; irc=$?
 end=$(git -C "$dir" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || end=unreadable
 # The tree at the end: tracked files only, and HEAD where it started; a failing git status is dirt (fail closed).

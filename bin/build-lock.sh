@@ -1,4 +1,4 @@
-# Sourced POSIX library (C5, founder 2026-10-03; docs/07 §2 item 10 "Builds"): one Rust build at a time per machine,
+# Sourced POSIX library (C5, founder 2026-10-03; docs/07 §2 item 12 "Builds"): one Rust build at a time per machine,
 # one shared CARGO_TARGET_DIR per repo across worktrees, sccache when installed.
 #   BUILD_LOCK_WHO=<name>; . standards/bin/build-lock.sh
 #   build_lock_acquire || ...   # 0 acquired or re-entered; 1 error; 2 bad BUILD_LOCK_WAIT or BUILD_LOCK_STALE;

@@ -25,7 +25,7 @@ git -C "$top" worktree add -q "$wt" -b "$branch" "$base"
 [ -f "$top/.env.example" ] && [ ! -f "$wt/.env" ] && cp "$top/.env.example" "$wt/.env"
 # No per-lane cargo config is written: the repo's one shared target (<primary>/target/shared) is chosen at build time by
 # standards/bin/build-lock.sh (C5), which cleans the workspace crates whenever a different worktree builds there, so no
-# lane can run another lane's compiled tests (the v0.1.11 hazard). Rationale and rule: docs/07 §2 item 10 "Builds".
+# lane can run another lane's compiled tests (the v0.1.11 hazard). Rationale and rule: docs/07 §2 item 12 "Builds".
 # The pinned standards come from the primary checkout's own copy (no network, works before the tag is pushed).
 git -C "$wt" -c protocol.file.allow=always -c "submodule.standards.url=$top/standards" submodule update -q --init
 # The TASK template comes from the pinned standards; inside the standards repo itself, from its own templates/.

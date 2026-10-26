@@ -6,7 +6,9 @@
 # still ends in gate-head, gate-tree and its red gate-verdict. A second fixture carries the game's instrument ids (m1_1,
 # m2_1, m2_2); at the end the gate's own red and green logs go through bin/merge-pr --local-log with a stub gh (the
 # review's blocker, end to end).
-# A third fixture holds the exchange's instrument ids (m0, e1, e2, e9, e10) for the newest-instrument rule.
+# A third fixture holds the exchange's instrument ids (m0, e1, e2, e9, e10) for the newest-instrument rule. The main
+# fixture is a Rust repo (a Cargo.toml at the top: check runs under the build lock); a Go-only fixture (go.mod, no
+# Cargo.toml) gets no lock and the log line "gate-lock: none (no Cargo.toml)" (exchange D-471).
 # Run: sh standards/tests/local-gate.t.sh   -> exit 0 when all cases behave.
 set -u
 S=$(cd "$(dirname "$0")/.." && pwd); LG="$S/bin/local-gate"; T=$(mktemp -d); R=0
@@ -25,11 +27,12 @@ printf '#!/bin/sh\necho "Mem: stub free $*"\n' > "$T/h/.cargo/bin/free"; chmod +
 # with its [FAIL] line; x-failline: a failed count without [FAIL]; x-zero: 0 ok and exit 0, so only the N >= 1 rule can
 # catch it; x-rc: exit code; x-commit: HEAD moves during the run; x-dirt: a tracked file modified; x-artifact: an
 # untracked file left behind; x-index: the index corrupted, so git status fails at the end). Both print where and how
-# they ran.
+# they ran; the stub check also says whether the build lock directory exists while it runs.
 P="$T/repo"; git init -q -b main "$P"; mkdir -p "$P/standards/bin" "$P/scripts/verify"
 cat > "$P/standards/bin/check" << 'C'
 #!/bin/sh
 echo "check-stub: cwd=$(pwd -P) lock=${BUILD_LOCK_TOKEN:+held}"
+if [ -d "${TMPDIR:-/tmp}/build.lock.d" ]; then echo "lockdir-stub: present"; else echo "lockdir-stub: absent"; fi
 if [ -e "$CTL/check-red" ]; then echo "FAIL  stub step"; echo "check: FAILED"; exit 1; fi
 echo "PASS  stub step"; echo "check: OK"; exit "$(cat "$CTL/check-rc" 2>/dev/null || echo 0)"
 C
@@ -45,8 +48,13 @@ if [ -e "$CTL/x-failline" ]; then echo "verify:x — 3 ok, 1 failed"; exit 0; fi
 if [ -e "$CTL/x-zero" ]; then echo "verify:x — 0 ok, 0 failed"; exit 0; fi
 echo "[ok]   a"; echo "[ok]   b"; echo "[ok]   c"; echo "verify:x — 3 ok, 0 failed"; exit "$(cat "$CTL/x-rc" 2>/dev/null || echo 0)"
 V
+# A Rust repo: the Cargo.toml at the top makes the gate take the build lock. The shared target is $T/target, stamped
+# as this checkout's own, so the lock library's switch clean (cargo metadata, cargo clean -p) never runs here.
+printf '[workspace]\nmembers = []\n' > "$P/Cargo.toml"
 echo readme > "$P/README"; git -C "$P" add -A; git -C "$P" commit -qm fixture; HD=$(git -C "$P" rev-parse HEAD)
 PP=$(cd "$P" && pwd -P)
+CARGO_TARGET_DIR="$T/target"; export CARGO_TARGET_DIR; mkdir -p "$T/target"
+git -C "$P" rev-parse --show-toplevel > "$T/target/.standards-worktree"
 echo 'the lane contract' > "$P/TASK.md"   # an untracked TASK.md at the top: the one dirt the gate allows
 P2="$T/nocheck"; git init -q -b main "$P2"; mkdir -p "$P2/scripts/verify"; cp "$P/scripts/verify/x.sh" "$P2/scripts/verify/"
 git -C "$P2" add -A; git -C "$P2" commit -qm nocheck
@@ -103,6 +111,16 @@ check_ "... it ends with gate-head: <HEAD>, gate-tree: clean and gate-verdict: g
 check_ "... check ran first, from the repo, under the build lock" 'grep -qx "check-stub: cwd=$PP lock=held" "$L" && [ "$(grep -n "^check-stub" "$L" | cut -d: -f1)" -lt "$(grep -n "^x-stub" "$L" | cut -d: -f1)" ]'
 check_ "... the instrument ran the full chain (no arguments) from the repo, with no lock from the gate and VERIFY_FAIL_TAIL=400" 'grep -qx "x-stub: cwd=$PP lock= args=0 VERIFY_FAIL_TAIL=400" "$L"'
 check_ "... the build lock was released" '[ ! -e "$T/build.lock.d" ]'
+check_ "... with a Cargo.toml the lock directory exists while check runs and no gate-lock: none line is written" 'grep -qx "lockdir-stub: present" "$L" && ! grep -q "^gate-lock:" "$L"'
+# Exchange D-471: a Go-only repo (go.mod, no Cargo.toml) runs check without the build lock, and the log says so.
+PGO="$T/gorepo"; git init -q -b main "$PGO"; mkdir -p "$PGO/standards/bin" "$PGO/scripts/verify"
+cp "$P/standards/bin/check" "$PGO/standards/bin/"; cp "$P/scripts/verify/x.sh" "$PGO/scripts/verify/"
+printf 'module example.com/g\n' > "$PGO/go.mod"; git -C "$PGO" add -A; git -C "$PGO" commit -qm go; HGO=$(git -C "$PGO" rev-parse HEAD)
+PGOP=$(cd "$PGO" && pwd -P)
+reset; nl; want "no build lock without Cargo.toml: a go.mod-only repo -> exit 0" 0 "^local-gate: OK x $HGO $L\$" sh "$LG" "$PGO" x "$L"
+check_ "... the log has gate-lock: none (no Cargo.toml) once, before check's output" '[ "$(grep -c "^gate-lock:" "$L")" -eq 1 ] && grep -qx "gate-lock: none (no Cargo.toml)" "$L" && [ "$(grep -n "^gate-lock:" "$L" | cut -d: -f1)" -lt "$(grep -n "^check-stub" "$L" | cut -d: -f1)" ]'
+check_ "... check ran with no lock token and the lock directory was never there while it ran" 'grep -qx "check-stub: cwd=$PGOP lock=" "$L" && grep -qx "lockdir-stub: absent" "$L"'
+check_ "... and no lock directory is left behind" '[ ! -e "$T/build.lock.d" ]'
 reset; nl; want "a caller's VERIFY_FAIL_TAIL=25 -> exit 0" 0 "^local-gate: OK x $HD $L\$" env VERIFY_FAIL_TAIL=25 sh "$LG" "$P" x "$L"
 check_ "... VERIFY_FAIL_TAIL=25 reached the instrument" 'grep -q "^x-stub: .* VERIFY_FAIL_TAIL=25\$" "$L"'
 # Red runs: exit 1, the reason named, the whole log written and ending in gate-head, gate-tree and the red verdict.
