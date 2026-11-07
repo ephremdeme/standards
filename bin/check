@@ -51,6 +51,11 @@ redact() { LC_ALL=C sed -e 's|://[^/?#@:[:space:]]*:[^/?#[:space:]]*@|://***@|g'
 #   ^WARNING: DATA RACE            and the next 6 lines
 #   ^[[:space:]]*running tests:    right after a ^panic: test timed out line, then the indented test names after it,
 #                                  10 lines in all
+#   ^[[:space:]]+<f>_test\.go:N:   a failing test's message line (a bare file name, no /), at most 10 per --- FAIL
+#                                  (exchange D-497; the count resets at each --- FAIL, lines before the first share
+#                                  one; a line the dedupe drops still counts; a stack frame /…_test.go:N +0x… is not
+#                                  one; under go test -v a passing test's t.Log line is kept too, and neither
+#                                  product's make test uses -v; a multi-line message's continuation lines are not)
 failing_block() { LC_ALL=C awk '
   { l[NR] = $0 } /\[(build|setup) failed\]/ { bf = NR }
   END {
@@ -58,6 +63,8 @@ failing_block() { LC_ALL=C awk '
       if (race > 0) { k = 1; race-- }
       if (names > 0) { if (s ~ /^[[:space:]]+[^[:space:]]/) { k = 1; names-- } else names = 0 }
       if (tmo) { tmo = 0; if (s ~ /^[[:space:]]*running tests:/) { k = 1; names = 9 } }
+      if (s ~ /^[[:space:]]*--- FAIL/) msg = 0
+      if (s ~ /^[[:space:]]+[^[:space:]\/]+_test\.go:[0-9]+: / && msg < 10) { k = 1; msg++ }
       if (s ~ /^[[:space:]]*--- FAIL/ || s ~ /^[[:space:]]*FAIL[[:space:]]/ || s ~ /^panic:/ || s ~ /seed[=:]/ ||
           s ~ /\[(build|setup) failed\]/) k = 1
       if (s ~ /^WARNING: DATA RACE/) { k = 1; race = 6 }
