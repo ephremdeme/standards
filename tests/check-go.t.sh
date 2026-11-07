@@ -223,6 +223,7 @@ judge "(w) twelve changed paths -> changed: gen/f01.go .. gen/f10.go in order, t
 #   ^WARNING: DATA RACE            and the next 6 lines
 #   ^[[:space:]]*running tests:    on the line right after ^panic: test timed out, then the indented test names after it,
 #                                  10 lines in all
+#   ^[[:space:]]+<f>_test\.go:N:   a failing test's message line (a bare file name, no /), at most 10 per --- FAIL
 # Both prints read the output after one redaction (sed): ://<user>:<password>@ -> ://***@, and password=<non-space>
 # (any case, so PGPASSWORD= too, the key kept) -> password=***; nothing else changes.
 # A stub `go test` prints ctl/go-test.out and fails; example/aa sorts first, then 40 passing lines from pkg/zz, so
@@ -239,8 +240,8 @@ gfail(){ [ "$(rc)" = 1 ] && has '^FAIL  go tests \(make test\)$' && has '^check:
 fixture; { printf '%s\n' "--- FAIL: TestEarly (0.00s)" "    aa_test.go:9: boom" "FAIL" "FAIL${TAB}example/aa${TAB}0.01s" \
   "--- FAIL: TestEarly (0.00s)"; zz; } | gout; run
 c_early(){ gfail && in_fb "--- FAIL: TestEarly (0.00s)" && in_fb "FAIL${TAB}example/aa${TAB}0.01s" \
-  && [ "$(fb | grep -c TestEarly)" -eq 1 ] && ! in_fb FAIL && ! tb | grep -q 'TestEarly'; }
-judge "§7.1 failing block names an early-sorting package: failing: holds --- FAIL: TestEarly and FAIL example/aa (once each, no bare FAIL), exit 1" c_early
+  && [ "$(fb | grep -c TestEarly)" -eq 1 ] && ! in_fb FAIL && ! tb | grep -q 'TestEarly' && in_fb "    aa_test.go:9: boom"; }
+judge "§7.1 failing block names an early-sorting package: failing: holds --- FAIL: TestEarly and FAIL example/aa (once each, no bare FAIL), exit 1, and its message line aa_test.go:9: boom" c_early
 judge "§7.1 ... the failing: line follows the tail of the failed step" sh -c '
   awk -v tb="$2" "\$0 == tb { s = 1; next } s && /^      / { next } s { print; exit }" "$1/out" | grep -qx "failing:"' _ "$T" "$TB"
 # §7.2 100 distinct --- FAIL lines, each printed twice: 80 kept, then the count of distinct lines
@@ -312,7 +313,25 @@ c_redact(){ gfail && ! grep -q SENTINEL "$T/out" \
   && tb | grep -qxF "    db_test.go:20: dial postgres://***@db:5432/x: connection refused" \
   && tb | grep -qxF "    db_test.go:21: password=*** PGPASSWORD=*** Password=***" \
   && tb | grep -qxF "    db_test.go:22: retry postgres://***@db/x via http://localhost:8080/api?email=a@b.c" \
-  && tb | grep -qxF "ok  ${TAB}example/pkg/zz/p40${TAB}0.01s"; }
+  && tb | grep -qxF "ok  ${TAB}example/pkg/zz/p40${TAB}0.01s" \
+  && in_fb "    db_test.go:20: dial postgres://***@db:5432/x: connection refused"; }
 judge "§7.12 redaction: no sentinel anywhere in check's output; ://***@ (to the last @) and password=*** in the tail and under failing:, a URL without credentials and other lines unchanged" c_redact
+# §7.13 a subtest's message lines: kept under failing:, in order, after the subtest's --- FAIL
+fixture; { printf '%s\n' "--- FAIL: TestA (0.00s)" "    --- FAIL: TestA/sub (0.00s)" "        a_test.go:5: want 2, got 3" \
+  "        a_test.go:6: second line" "FAIL${TAB}example/aa${TAB}0.01s"; zz; } | gout; run
+c_msgsub(){ gfail && [ "$(fb | grep -E 'TestA/sub|a_test\.go:')" = "$(printf '%s\n' "    --- FAIL: TestA/sub (0.00s)" \
+  "        a_test.go:5: want 2, got 3" "        a_test.go:6: second line")" ]; }
+judge "§7.13 failing block: a subtest's message lines a_test.go:5: and a_test.go:6: are kept, in order, after the subtest's --- FAIL" c_msgsub
+# §7.14 twelve message lines under one --- FAIL: the first 10 kept; the counter resets at the next --- FAIL
+fixture; { echo "--- FAIL: TestB (0.00s)"; awk 'BEGIN { for (i = 1; i <= 12; i++) printf "    b_test.go:%d: line %d\n", i, i }'
+  printf '%s\n' "--- FAIL: TestC (0.00s)" "    c_test.go:1: other"; zz; } | gout; run
+c_msgcap(){ gfail && [ "$(fb | grep -c 'b_test\.go:')" -eq 10 ] && in_fb "    b_test.go:1: line 1" && in_fb "    b_test.go:10: line 10" \
+  && ! fb | grep -qF "b_test.go:11:" && ! fb | grep -qF "b_test.go:12:" && in_fb "    c_test.go:1: other"; }
+judge "§7.14 failing block: at most 10 message lines per --- FAIL; the next test's line is kept" c_msgcap
+# §7.15 control: lines that look like message lines but are not one
+fixture; { printf '%s\n' "--- FAIL: TestD (0.00s)" "    d_test.go:3: kept" "      /src/aa/d_test.go:9: a path is not a message" \
+  "    d_test.go:4 no colon after the number" "    helper.go:7: not a test file" "ok  ${TAB}example/pass${TAB}0.01s"; zz; } | gout; run
+c_msgnot(){ gfail && in_fb "    d_test.go:3: kept" && [ "$(fb | grep -cE 'd_test\.go|helper\.go')" -eq 1 ]; }
+judge "§7.15 failing block: control: a slashed path, a line number without ': ' and a non-test file are not message lines" c_msgnot
 
 rm -rf "$T"; [ $R -eq 0 ] && echo "check-go.t: all cases behave" || echo "check-go.t: FAILURES"; exit $R
