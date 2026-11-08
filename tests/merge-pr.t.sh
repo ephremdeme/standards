@@ -7,6 +7,7 @@
 # The --local-log cases (D-109) write the gate log line by line (glog) and make every check-runs, status and nightly
 # read fail (nochecks), so a merge proves those endpoints were not needed and the calls log proves they were not read;
 # a green log ends, as bin/local-gate writes it, in gate-head, gate-tree: clean and one gate-verdict: green <id>.
+# The --targeted-log cases (v0.1.32) do the same with bin/targeted-gate's log (tlog), whose verdict is green targeted.
 # Run: sh standards/tests/merge-pr.t.sh   -> exit 0 when all cases behave.
 set -u
 S=$(cd "$(dirname "$0")/.." && pwd); MP="$S/bin/merge-pr"; T=$(mktemp -d); R=0
@@ -214,6 +215,56 @@ refused "a gate verdict whose id has no passing verify line" "local log $LL has 
 mk; nochecks; glog 'check: OK' "$V8" "$GHL" "$GT" 'gate-verdict: green e8'
 refused "a milestone local log whose gate verdict names another milestone" "local log $LL has gate-verdict: green e8, not e9 \(the full chain of e9 is required\)\$" $EX 12 "$H" $MS --local-log "$LL"
 check_ "control: ... the nightly runs were not read" '[ -s "$G/calls" ] && ! grep -q nightly "$G/calls"'
+# Rule 3, exchange, game and kefa hotfix and small PRs: the targeted gate log (bin/targeted-gate, v0.1.32) instead of the
+# check runs and the status; a head branch whose last segment starts hotfix- or small-, never a milestone.
+TL="$T/targeted.log"; HX=opus/hotfix-settings-caps; SM=opus/small-docs-typo
+TOK='targeted-result: ok go test -count=1 ./internal/x'; SEC='PASS  secret scan (committed history)'
+SEC2='PASS  secret scan (uncommitted + untracked)'; GVT='gate-verdict: green targeted'
+tlog(){ printf '%s\n' "$@" > "$TL"; }   # tlog <line>...: the targeted gate log, exactly these lines
+greentl(){ tlog 'Mem: 7900 total' 'targeted: make lint' 'targeted-result: ok make lint' 'targeted: go test -count=1 ./internal/x' "$TOK" "$SEC" "$SEC2" 'check: OK' "$GHL" "$GT" "$GVT"; }
+mk $HX; nochecks; greentl; glog 'check: OK' "$V9" "$GHL" "$GT" "$GV9"
+refused "--targeted-log together with --local-log" '--targeted-log and --local-log cannot be given together$' $EX 12 "$H" --targeted-log "$TL" --local-log "$LL"
+printf 'PASS    a\nsmoke-head: %s\n' "$H" > "$SL"
+refused "--targeted-log together with --smoke-log" '--targeted-log and --smoke-log cannot be given together$' $EX 12 "$H" --targeted-log "$TL" --smoke-log "$SL"
+mk; nochecks; greentl; refused "--targeted-log with --milestone" '--targeted-log cannot be combined with --milestone \(a milestone keeps the full gate: --local-log\)$' $EX 12 "$H" $MS --targeted-log "$TL"
+mk $HX; greentl; refused "--targeted-log on standards" '--targeted-log applies to ephremdeme/\{exchange,game,kefa\} only$' $ST 9 "$H" --targeted-log "$TL"
+mk; nochecks; greentl; refused "--targeted-log on an integration branch" "PR #12 head branch $IB is a milestone branch: --targeted-log is refused \(a milestone keeps the full gate: --local-log\)\$" $EX 12 "$H" --targeted-log "$TL"
+mk opus/e12-l3; nochecks; greentl; refused "--targeted-log on a lane branch (opus/e12-l3)" '--targeted-log needs a head branch whose last segment starts hotfix- or small- \(opus/e12-l3 ends in e12-l3\)$' $EX 12 "$H" --targeted-log "$TL"
+mk opus/hotfix-a/e12; nochecks; greentl; refused "--targeted-log when hotfix- is not the last segment (opus/hotfix-a/e12)" '--targeted-log needs a head branch whose last segment starts hotfix- or small- \(opus/hotfix-a/e12 ends in e12\)$' $GA 12 "$H" --targeted-log "$TL"
+mk opus/hotfix-; nochecks; greentl; refused "--targeted-log on a bare hotfix- segment" '--targeted-log needs a head branch whose last segment starts hotfix- or small- \(opus/hotfix- ends in hotfix-\)$' $EX 12 "$H" --targeted-log "$TL"
+mk $HX; nochecks; refused "a targeted log that does not exist" "targeted log $T/none is not a readable file\$" $EX 12 "$H" --targeted-log "$T/none"
+mk $HX; nochecks; : > "$TL"; refused "an empty targeted log" "targeted log $TL is empty\$" $EX 12 "$H" --targeted-log "$TL"
+mk $HX; nochecks; tlog "$TOK" 'targeted-result: FAILED (exit 2) make lint' "$SEC" "$GHL" "$GT" "$GVT"
+refused "a targeted log with a targeted-result: FAILED line" "targeted log $TL has 1 targeted-result: FAILED line\(s\)\$" $EX 12 "$H" --targeted-log "$TL"
+mk $HX; nochecks; tlog "$TOK" "$SEC" 'check: FAILED' "$GHL" "$GT" "$GVT"
+refused "a targeted log with check: FAILED" "targeted log $TL has 1 check: FAILED line\(s\)\$" $EX 12 "$H" --targeted-log "$TL"
+mk $HX; nochecks; tlog "$TOK" '[FAIL] b (rc=1, wanted 0, /x/)' "$SEC" "$GHL" "$GT" "$GVT"
+refused "a targeted log with a [FAIL] line" "targeted log $TL has 1 \[FAIL\] line\(s\)\$" $EX 12 "$H" --targeted-log "$TL"
+mk $HX; nochecks; tlog "$TOK" "$SEC" 'FAIL  agent definitions match pinned standards' "$GHL" "$GT" "$GVT"
+refused "a targeted log with a FAIL line" "targeted log $TL has 1 FAIL line\(s\)\$" $EX 12 "$H" --targeted-log "$TL"
+mk $HX; nochecks; tlog 'targeted: make lint' "$SEC" "$GHL" "$GT" "$GVT"
+refused "a targeted log without a targeted-result: ok line" "targeted log $TL has no targeted-result: ok line\$" $EX 12 "$H" --targeted-log "$TL"
+mk $HX; nochecks; tlog "$TOK" 'check: OK' "$GHL" "$GT" "$GVT"
+refused "a targeted log without a PASS  secret scan line" "targeted log $TL has no PASS  secret scan line\$" $EX 12 "$H" --targeted-log "$TL"
+mk $HX; nochecks; tlog "$TOK" "$SEC" "$GT" "$GVT"; refused "a targeted log without gate-head" "targeted log $TL has no gate-head line\$" $EX 12 "$H" --targeted-log "$TL"
+mk $HX; nochecks; tlog "$TOK" "$SEC" "gate-head: $X" "$GT" "$GVT"; refused "a targeted log for another SHA" "targeted log $TL is for $X, not $H\$" $EX 12 "$H" --targeted-log "$TL"
+mk $HX; nochecks; tlog "$TOK" "$SEC" "$GHL" "gate-head: $X" "$GT" "$GVT"; refused "a targeted log naming two heads" "targeted log $TL is for $X, not $H\$" $EX 12 "$H" --targeted-log "$TL"
+mk $HX; nochecks; tlog "$TOK" "$SEC" "gate-head: $H8" "$GT" "$GVT"
+refused "a targeted log whose gate-head is not 40 lowercase hex" "targeted log $TL has a gate-head line that is not 'gate-head: <40 lowercase hex>': gate-head: $H8\$" $EX 12 "$H" --targeted-log "$TL"
+mk $HX; nochecks; tlog "$TOK" "$SEC" "$GHL" "$GVT"; refused "a targeted log without gate-tree" "targeted log $TL has no gate-tree: clean line\$" $EX 12 "$H" --targeted-log "$TL"
+mk $HX; nochecks; tlog "$TOK" "$SEC" "$GHL" 'gate-tree: dirty (README)' "$GVT"
+refused "a targeted log with gate-tree: dirty" "targeted log $TL has gate-tree: dirty \(README\), not gate-tree: clean\$" $EX 12 "$H" --targeted-log "$TL"
+mk $HX; nochecks; tlog "$TOK" "$SEC" "$GHL" "$GT" "gate-verdict: red — the command 'make lint' exited 2"
+refused "a targeted log whose gate verdict is red" "targeted log $TL has a red gate verdict \(gate-verdict: red — the command 'make lint' exited 2\)\$" $EX 12 "$H" --targeted-log "$TL"
+mk $HX; nochecks; tlog "$TOK" "$SEC" "$GHL" "$GT"; refused "a targeted log without a verdict" "targeted log $TL has no gate-verdict: green targeted line\$" $EX 12 "$H" --targeted-log "$TL"
+mk $HX; nochecks; tlog "$TOK" "$SEC" "$GHL" "$GT" "$GVT" "$GVT"
+refused "a targeted log with two gate-verdict lines" "targeted log $TL has 2 gate-verdict lines \(exactly one gate-verdict: green targeted expected\)\$" $EX 12 "$H" --targeted-log "$TL"
+mk $HX; nochecks; tlog "$TOK" "$SEC" "$V9" "$GHL" "$GT" "$GV9"
+refused "a targeted log whose verdict is local-gate's (green e9)" "targeted log $TL has gate-verdict: green e9, a local-gate verdict \(use --local-log\)\$" $EX 12 "$H" --targeted-log "$TL"
+mk $LB; nochecks; glog 'check: OK' "$V9" "$GHL" "$GT" "$GVT"
+refused "a local log whose verdict is targeted-gate's (green targeted)" "local log $LL has gate-verdict: green targeted, a targeted-gate verdict \(use --targeted-log\)\$" $EX 12 "$H" --local-log "$LL"
+mk $HX; pr OPEN false "$H" main $HX false 2; files internal/x.go .github/workflows/ci.yml; nochecks; greentl
+refused "a targeted .github change without founder-approved (rule 4 unchanged)" 'label founder-approved is not on PR #12 \(required: changes \.github/workflows/ci\.yml\)$' $EX 12 "$H" --targeted-log "$TL"
 # Founder approval forced by the paths a PR changes (.github/**, .claude/**, CODEOWNERS).
 mk $LB; pr OPEN false "$H" main $LB false 2; files code.rs .github/workflows/ci.yml
 refused "a .github change without founder-approved" 'label founder-approved is not on PR #12 \(required: changes \.github/workflows/ci\.yml\)$' $EX 12 "$H"
@@ -326,5 +377,15 @@ mk integration/gp; compare ahead docs/md-reports/gp-milestone-review.md; nocheck
 glog 'check: OK' 'verify:gp — 407 ok, 0 failed' "$GHL" "$GT" 'gate-verdict: green gp'
 merged "a milestone merge whose id has no digit (gp)" "merge-pr: OK $EX#12 $H merged milestone gp" $EX 12 "$H" --milestone gp --local-log "$LL"
 check_ "... the review file read is gp's" 'grep -Fqx "api repos/$EX/contents/docs/md-reports/gp-milestone-review.md?ref=$H" "$G/calls"'
+# The targeted path (v0.1.32): one hotfix or small PR per repository merged on a green targeted gate log alone.
+mk $HX; pr OPEN false "$H" main $HX false 1; nochecks; greentl
+merged "a hotfix PR on exchange with a green targeted log" "merge-pr: OK $EX#12 $H merged" $EX 12 "$H" --targeted-log "$TL"
+check_ "... merged without reading the check runs, the commit status or the nightly runs" '[ -e "$G/merge" ] && ! grep -q -e check-runs -e /status -e nightly "$G/calls"'
+mk $HX; pr OPEN false "$H" main $HX false 1; nochecks; greentl
+merged "a hotfix PR on game with a green targeted log" "merge-pr: OK $GA#12 $H merged" $GA 12 "$H" --targeted-log "$TL"
+check_ "... merged without reading the check runs or the commit status" '[ -e "$G/merge" ] && ! grep -q -e check-runs -e /status "$G/calls"'
+mk $SM; pr OPEN false "$H" main $SM false 1; nochecks; greentl
+merged "a small PR on kefa with a green targeted log" "merge-pr: OK $KE#12 $H merged" $KE 12 "$H" --targeted-log "$TL"
+check_ "... merged without reading the check runs or the commit status" '[ -e "$G/merge" ] && ! grep -q -e check-runs -e /status "$G/calls"'
 want "two arguments -> usage, exit 2" 2 '^merge-pr: usage: merge-pr ' sh "$MP" $EX 12
 rm -rf "$T"; [ $R -eq 0 ] && echo "merge-pr.t: all cases behave" || echo "merge-pr.t: FAILURES"; exit $R

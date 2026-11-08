@@ -1,0 +1,108 @@
+#!/bin/sh
+# Usage: standards/bin/targeted-gate <repo-dir> <log> <cmd> [<cmd> ...]   (the integrator, on the dev machine; v0.1.32)
+# The small sibling of bin/local-gate, for a hotfix or small PR (a head branch whose last segment starts hotfix- or
+# small-, never a milestone; docs/07 §4 says which commands it must name). From the top of <repo-dir> each <cmd> runs
+# with `sh -c`, stdin /dev/null, after the log line "targeted: <cmd>", its output appended, then
+# "targeted-result: ok <cmd>" or "targeted-result: FAILED (exit N) <cmd>"; every command runs even after one fails.
+# Then the secret scans, exactly as check runs them: this checkout's own bin/check --only secrets (the committed history
+# and the uncommitted + untracked content, each with its PASS/FAIL line; rust, frontend and go are skipped), so the
+# scan code exists once. The log starts with `free -m` ($HOME/.cargo/bin first on PATH, as local-gate) and always ends,
+# green or red, with "gate-head: <full SHA of HEAD at the start>" (a second gate-head line if HEAD moved), one
+# "gate-tree: clean" or "gate-tree: dirty (<first path>|HEAD moved|git status failed)" (tracked files only, as
+# local-gate) and one "gate-verdict: green targeted" or "gate-verdict: red — <first reason>". The verdict is decided
+# before these lines, from the exit codes, check's own output and the log read as merge-pr --targeted-log reads it, so
+# a green log is always one merge-pr accepts: every command ok, both scans PASS (and check exited 0), the tree clean,
+# HEAD unmoved, and no command printed a "FAIL ", "[FAIL]", "check: FAILED", "targeted-result: FAILED" or gate-* line.
+# `merge-pr --targeted-log` reads the log; like local-gate's, the evidence is integrator-attested, bound to the SHA by
+# gate-head.
+# Refused (exit 2, "targeted-gate: refused — <reason>", nothing run and no log written): no <cmd>; an empty <cmd>, one
+# containing a newline or naming .env (.env is data, never read by a gate command); <repo-dir> not the top level of a
+# git checkout with a commit, or `git status` failing; a tree that is not clean apart from an untracked TASK.md at the
+# top (the first other status line named); a <log> that exists (even as a dangling link) or cannot be created.
+# Exit 0, "targeted-gate: OK <sha> <log>", on a green verdict; otherwise exit 1, "targeted-gate: RED <sha> — <first
+# reason> (log <log>)", the verdict line's reason, or "the log could not be written".
+set -u
+PATH="$HOME/.cargo/bin:$PATH"; export PATH
+LC_ALL=C; export LC_ALL
+here=$(cd "$(dirname "$0")" && pwd -P) || { echo "targeted-gate: cannot locate its own directory" >&2; exit 2; }
+refuse() { echo "targeted-gate: refused — $1" >&2; exit 2; }
+[ $# -ge 2 ] || { echo "targeted-gate: usage: targeted-gate <repo-dir> <log> <cmd> [<cmd> ...]" >&2; exit 2; }
+dir=$1; log=$2; shift 2
+[ $# -ge 1 ] || refuse "no command given (targeted-gate <repo-dir> <log> <cmd> [<cmd> ...])"
+nl='
+'
+for c in "$@"; do
+  case "$c" in '') refuse "an empty command";; *"$nl"*) refuse "a command contains a newline";; esac
+  case "$c" in *.env*) refuse "the command '$c' names .env (.env is data; no gate command reads it)";; esac
+done
+nottop() { refuse "$dir is not the top level of a git checkout with a commit"; }
+[ -d "$dir" ] || nottop
+top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) && [ -n "$top" ] || nottop
+[ "$(cd "$top" && pwd -P)" = "$(cd "$dir" && pwd -P)" ] || nottop
+head=$(git -C "$dir" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || nottop
+case "$head" in ''|*[!0-9a-f]*) nottop;; esac
+st=$(git -C "$dir" status --porcelain --untracked-files=all --ignore-submodules=none 2>/dev/null) || refuse "git status failed in $dir"
+dirt=$(printf '%s\n' "$st" | grep -vx '?? TASK.md' | grep . | head -n 1)
+[ -z "$dirt" ] || refuse "the tree of $dir is not clean (first: ${dirt#???})"
+[ -f "$here/check" ] || refuse "$here has no check (the secret scans)"
+if [ -e "$log" ] || [ -L "$log" ]; then refuse "$log exists; the gate writes a fresh log only"; fi
+# noclobber: the log is created here or not at all, never truncated.
+( set -C; : > "$log" ) 2>/dev/null || refuse "cannot create the log $log"
+sout=
+trap '[ -z "$sout" ] || rm -f "$sout"' EXIT
+trap 'exit 1' HUP INT TERM
+red() { echo "targeted-gate: RED $head — $1 (log $log)" >&2; exit 1; }
+free -m >> "$log" 2>&1 || echo "targeted-gate: free -m failed (exit $?)" >> "$log"
+cmd_why=
+for c in "$@"; do
+  printf 'targeted: %s\n' "$c" >> "$log" || red "the log could not be written"
+  ( cd "$top" && sh -c "$c" ) < /dev/null >> "$log" 2>&1; rc=$?
+  if [ $rc -eq 0 ]; then printf 'targeted-result: ok %s\n' "$c" >> "$log" || red "the log could not be written"
+  else
+    printf 'targeted-result: FAILED (exit %s) %s\n' "$rc" "$c" >> "$log" || red "the log could not be written"
+    [ -n "$cmd_why" ] || cmd_why="the command '$c' exited $rc"
+  fi
+done
+# The secret scans: check's own steps, judged from check's own output (a command cannot print them for it).
+sout=$(mktemp) || red "mktemp failed"
+( cd "$top" && sh "$here/check" --only secrets ) < /dev/null > "$sout" 2>&1; src=$?
+cat "$sout" >> "$log" || red "the log could not be written"
+sec_why=
+if ! grep -qx 'PASS  secret scan (committed history)' "$sout"; then sec_why="the secret scan (committed history) did not pass"
+elif ! grep -qx 'PASS  secret scan (uncommitted + untracked)' "$sout"; then sec_why="the secret scan (uncommitted + untracked) did not pass"
+elif [ $src -ne 0 ]; then sec_why="check --only secrets exited $src"
+fi
+end=$(git -C "$top" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || end=unreadable
+# The tree at the end: tracked files only, and HEAD where it started; a failing git status is dirt (fail closed).
+tree=clean; tree_why=
+if est=$(git -C "$top" status --porcelain --untracked-files=no --ignore-submodules=none 2>/dev/null); then
+  first=$(printf '%s\n' "$est" | grep . | head -n 1)
+  if [ -n "$first" ]; then tree="dirty (${first#???})"; tree_why="the tree is not clean at the end (first: ${first#???})"
+  elif [ "$end" != "$head" ]; then tree="dirty (HEAD moved)"
+  fi
+else tree="dirty (git status failed)"; tree_why="git status failed at the end"
+fi
+# The verdict, before the trailing lines: the log read as merge-pr --targeted-log reads it, plus what only the gate sees.
+cnt() { grep -c -E -- "$1" "$log"; [ $? -le 1 ]; }
+why=
+n_tf=$(cnt '^targeted-result: FAILED') && n_cf=$(cnt '^check: FAILED') && n_bf=$(cnt '^\[FAIL\]') \
+  && n_f=$(cnt '^FAIL ') && n_ok=$(cnt '^targeted-result: ok ') && n_g=$(cnt '^gate-(head|tree|verdict):') \
+  || why="the log could not be read"
+if [ -n "$why" ]; then :
+elif [ "$end" != "$head" ]; then why="HEAD moved from $head to $end during the run"
+elif [ -n "$tree_why" ]; then why=$tree_why
+elif [ -n "$cmd_why" ]; then why=$cmd_why
+elif [ -n "$sec_why" ]; then why=$sec_why
+elif [ "$n_tf" -ne 0 ]; then why="the log has $n_tf targeted-result: FAILED line(s)"
+elif [ "$n_cf" -ne 0 ]; then why="the log has $n_cf check: FAILED line(s)"
+elif [ "$n_bf" -ne 0 ]; then why="the log has $n_bf [FAIL] line(s)"
+elif [ "$n_f" -ne 0 ]; then why="the log has $n_f FAIL line(s)"
+elif [ "$n_ok" -lt 1 ]; then why="the log has no targeted-result: ok line"
+elif [ "$n_g" -ne 0 ]; then why="a command printed $n_g gate-head, gate-tree or gate-verdict line(s)"
+fi
+if [ -z "$why" ]; then verdict="green targeted"; else verdict="red — $why"; fi
+{ printf 'gate-head: %s\n' "$head"; if [ "$end" != "$head" ]; then printf 'gate-head: %s\n' "$end"; fi
+  printf 'gate-tree: %s\n' "$tree"; printf 'gate-verdict: %s\n' "$verdict"; } >> "$log" \
+  || red "the log could not be written"
+[ -z "$why" ] || red "$why"
+echo "targeted-gate: OK $head $log"

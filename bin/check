@@ -2,9 +2,11 @@
 # Portable (POSIX sh) full local gate. No pass-result caching (by design; add only after measured need).
 # Artifact caches (sccache, cargo/npm caches) are fine. CI on the integrated change stays authoritative.
 # Exit 0 only if every applicable step passed. Missing tool = BLOCKED = failure (never silently skipped).
-# Usage: check [--only rust|web|go|all]   (default all). Lane checks match the lane (C6, founder 2026-10-03): a lane runs
-# `--only <kind>` with <kind> from `owned-paths --kind TASK.md`; integrated CI runs check without --only (everything).
-# The secret scans and the agent-definitions step always run. The Rust steps run under the machine build lock with the
+# Usage: check [--only rust|web|go|secrets|all]   (default all). Lane checks match the lane (C6, founder 2026-10-03): a
+# lane runs `--only <kind>` with <kind> from `owned-paths --kind TASK.md`; integrated CI runs check without --only
+# (everything). `--only secrets` (v0.1.32) skips rust, frontend and go, so bin/targeted-gate runs these same scans; the
+# usage line below keeps its v0.1.25 text (tests/check-go.t.sh pins it). The secret scans and the agent-definitions step
+# always run. The Rust steps run under the machine build lock with the
 # repo's shared CARGO_TARGET_DIR (C5, bin/build-lock.sh); a lock held elsewhere after BUILD_LOCK_WAIT is BLOCKED rust.
 # A Go module (go.mod) runs make gen, the committed-output check, make lint and make test, without the build lock
 # (exchange D-158: Go's memory is small and its cache is per-user).
@@ -15,7 +17,7 @@ usage() { echo "check: usage: check [--only rust|web|go|all]" >&2; exit 2; }
 only=all
 if [ $# -gt 0 ]; then
   [ $# -eq 2 ] && [ "$1" = "--only" ] || usage
-  case "$2" in rust|web|go|all) only=$2;; *) usage;; esac
+  case "$2" in rust|web|go|secrets|all) only=$2;; *) usage;; esac
 fi
 fail_tail=${VERIFY_FAIL_TAIL:-15}
 case "$fail_tail" in 0*|*[!0-9]*) fail_tail=;; esac
@@ -85,7 +87,7 @@ step() { name=$1; shift; out=$("$@" 2>&1); rc=$?
   printf '%s\n' "$out" | failing_block; }
 need() { command -v "$1" >/dev/null 2>&1 || { echo "BLOCKED $2 (missing tool: $1)"; fail=1; return 1; }; }
 
-if [ "$only" = web ] || [ "$only" = go ]; then echo "SKIP  rust (--only $only)"
+if [ "$only" = web ] || [ "$only" = go ] || [ "$only" = secrets ]; then echo "SKIP  rust (--only $only)"
 elif [ -f Cargo.toml ]; then
   if need cargo "rust"; then
     BUILD_LOCK_WHO=check; . "$(dirname "$0")/build-lock.sh"
@@ -106,7 +108,7 @@ elif [ -f Cargo.toml ]; then
   fi
 else echo "SKIP  rust (no Cargo.toml)"; fi
 
-if [ "$only" = rust ] || [ "$only" = go ]; then echo "SKIP  frontend (--only $only)"
+if [ "$only" = rust ] || [ "$only" = go ] || [ "$only" = secrets ]; then echo "SKIP  frontend (--only $only)"
 elif [ -f web/package.json ]; then
   if need npm "frontend"; then
     # Always a clean install from the lockfile: a pre-existing node_modules is never trusted (retro review 8).
@@ -158,7 +160,7 @@ go_committed() {
   sed 's/^</before:/; s/^>/after: /' "$d/st.diff" | head -n $((13 - n))
   return 1
 }
-if [ "$only" = rust ] || [ "$only" = web ]; then echo "SKIP  go (--only $only)"
+if [ "$only" = rust ] || [ "$only" = web ] || [ "$only" = secrets ]; then echo "SKIP  go (--only $only)"
 elif [ -f go.mod ]; then
   go_ok=1; need go "go" || go_ok=0; need make "go" || go_ok=0
   if [ $go_ok -eq 1 ] && [ ! -f Makefile ]; then echo "BLOCKED go (no Makefile with gen, lint and test targets)"; fail=1

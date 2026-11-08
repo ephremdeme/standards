@@ -1,6 +1,7 @@
 #!/bin/sh
 # Usage: standards/bin/merge-pr <owner/repo> <pr> <full-head-sha> [--smoke-log <path> | --local-log <path>]
 #          [--milestone <mN> [--residual D-NNN]]
+#        standards/bin/merge-pr <owner/repo> <pr> <full-head-sha> --targeted-log <path>   (hotfix-/small- PRs, v0.1.32)
 # The integrator's only merge path (exchange D-086; D-088 item 7 is its milestone checklist). Merges PR <pr> into main
 # with `gh pr merge <pr> --repo <r> --merge --match-head-commit <sha>`, so GitHub refuses if the head moved after the
 # checks below. Every fact except the integrator-attested --smoke-log/--local-log file is read from GitHub at the exact
@@ -30,6 +31,17 @@
 #     before the outer run fails, so only local-gate's verdict says the gate passed). Integrator-attested like the smoke
 #     log, bound to the SHA by gate-head. Without --local-log exchange and game keep the check-runs path above (a
 #     self-hosted runner can revive it).
+#     exchange, game and kefa with --targeted-log <path> (v0.1.32, the founder 2026-11-08: "add merge-pr hotfix and
+#     small changes mode for targeted runs"; the log is bin/targeted-gate's): only for a head branch whose last segment
+#     starts "hotfix-" or "small-" (one character at least after the hyphen), never integration/* and never with
+#     --local-log, --smoke-log or --milestone (a milestone keeps the full gate). The log replaces this whole step as
+#     --local-log does. A readable, non-empty file with no line starting "targeted-result: FAILED", "check: FAILED",
+#     "[FAIL]" or "FAIL "; >= 1 line starting "targeted-result: ok "; >= 1 line starting "PASS  secret scan";
+#     gate-head and gate-tree lines as for --local-log; no "gate-verdict: red" line and exactly one line starting
+#     "gate-verdict:", which is "gate-verdict: green targeted". A --targeted-log verdict "green <id>" (local-gate's) is
+#     refused naming --local-log, and a --local-log verdict "green targeted" naming --targeted-log, so neither mode is
+#     satisfied by the other's log. Integrator-attested like the other logs, bound to the SHA by gate-head; rule 4
+#     applies unchanged.
 #  4. The label founder-approved is required for a milestone PR (head integration/*) and for any PR whose files
 #     (gh api --paginate .../pulls/<pr>/files, as many as changedFiles) include .github/**, .claude/** or a CODEOWNERS
 #     file (also as a rename's previous name). Label timing: the newest entry of the branch's activity
@@ -65,12 +77,13 @@ refuse() { echo "merge-pr: refused — $1" >&2; exit 2; }
 usage() { echo "merge-pr: usage: merge-pr <owner/repo> <pr> <full-head-sha> [--smoke-log <path> | --local-log <path>] [--milestone <mN> [--residual D-NNN]]" >&2; exit 2; }
 [ $# -ge 3 ] || usage
 r=$1; pr=$2; sha=$3; shift 3
-ms=; ms_set=0; smoke=; smoke_set=0; resid=; resid_set=0; llog=; llog_set=0
+ms=; ms_set=0; smoke=; smoke_set=0; resid=; resid_set=0; llog=; llog_set=0; tlog=; tlog_set=0
 while [ $# -gt 0 ]; do
   case $1 in
     --milestone) [ $# -ge 2 ] && [ $ms_set -eq 0 ] || usage; ms=$2; ms_set=1; shift 2;;
     --smoke-log) [ $# -ge 2 ] && [ $smoke_set -eq 0 ] || usage; smoke=$2; smoke_set=1; shift 2;;
     --local-log) [ $# -ge 2 ] && [ $llog_set -eq 0 ] || usage; llog=$2; llog_set=1; shift 2;;
+    --targeted-log) [ $# -ge 2 ] && [ $tlog_set -eq 0 ] || usage; tlog=$2; tlog_set=1; shift 2;;
     --residual) [ $# -ge 2 ] && [ $resid_set -eq 0 ] || usage; resid=$2; resid_set=1; shift 2;;
     *) usage;;
   esac
@@ -82,11 +95,17 @@ case "$sha" in *[!0-9a-f]*|'') refuse "$sha is not a full 40-character lowercase
 case "$r" in ephremdeme/exchange|ephremdeme/standards|ephremdeme/game|ephremdeme/kefa) ;; *) refuse "$r is not ephremdeme/{exchange,standards,game,kefa}";; esac
 case "$pr" in ''|0*|*[!0-9]*) refuse "$pr is not a PR number";; esac
 [ $resid_set -eq 0 ] || [ $ms_set -eq 1 ] || refuse "--residual applies to milestone PRs only"
+if [ $tlog_set -eq 1 ]; then # v0.1.32: the targeted mode stands alone
+  [ $llog_set -eq 0 ] || refuse "--targeted-log and --local-log cannot be given together"
+  [ $smoke_set -eq 0 ] || refuse "--targeted-log and --smoke-log cannot be given together"
+  [ $ms_set -eq 0 ] || refuse "--targeted-log cannot be combined with --milestone (a milestone keeps the full gate: --local-log)"
+  [ "$r" != ephremdeme/standards ] || refuse "--targeted-log applies to ephremdeme/{exchange,game,kefa} only"
+fi
 [ $smoke_set -eq 0 ] || [ $llog_set -eq 0 ] || refuse "--local-log and --smoke-log cannot be given together"
 [ $smoke_set -eq 0 ] || [ "$r" = ephremdeme/standards ] || refuse "--smoke-log applies to ephremdeme/standards only"
 [ $llog_set -eq 0 ] || [ "$r" != ephremdeme/standards ] \
   || refuse "--local-log applies to ephremdeme/{exchange,game,kefa} only (ephremdeme/standards uses --smoke-log)"
-[ "$r" != ephremdeme/kefa ] || [ $llog_set -eq 1 ] || refuse "ephremdeme/kefa has no PR CI: --local-log <path> is required"
+[ "$r" != ephremdeme/kefa ] || [ $llog_set -eq 1 ] || [ $tlog_set -eq 1 ] || refuse "ephremdeme/kefa has no PR CI: --local-log <path> is required"
 if [ $ms_set -eq 1 ]; then
   # A lowercase letter first; no digit is required (exchange gp, 2026-10-20: local-gate accepts digit-less ids).
   case "$ms" in [a-z]*) ;; *) refuse "$ms is not a milestone id";; esac
@@ -133,6 +152,11 @@ labels=$(jq -r '.labels[].name' "$tmp/pr.json") || refuse "gh pr view returned u
 [ "$base" = main ] || refuse "PR #$pr base is $base, not main"
 case "$hb" in ''|*[!A-Za-z0-9._/-]*) refuse "PR #$pr head branch '$hb' is not a plain branch name";; esac
 need_fa=
+if [ $tlog_set -eq 1 ]; then
+  case "$hb" in integration/*) refuse "PR #$pr head branch $hb is a milestone branch: --targeted-log is refused (a milestone keeps the full gate: --local-log)";; esac
+  seg=${hb##*/}
+  case "$seg" in hotfix-?*|small-?*) ;; *) refuse "--targeted-log needs a head branch whose last segment starts hotfix- or small- ($hb ends in $seg)";; esac
+fi
 case "$hb" in
   integration/*)
     [ $ms_set -eq 1 ] || refuse "PR #$pr head branch $hb is a milestone branch: --milestone ${hb#integration/} is required"
@@ -186,9 +210,47 @@ elif [ $llog_set -eq 1 ]; then
   [ -n "$vgreen" ] || refuse "local log $llog has no gate-verdict: green line"
   n=$(lcount '^gate-verdict:') || exit 2
   [ "$n" -eq 1 ] || refuse "local log $llog has $n gate-verdict lines (exactly one gate-verdict: green <id> expected)"
+  # v0.1.32: a targeted gate's verdict never stands in for the full gate (after the count, so older refusals keep
+  # their messages).
+  printf '%s\n' "$vgreen" | grep -Fqvx -- 'gate-verdict: green targeted' \
+    || refuse "local log $llog has gate-verdict: green targeted, a targeted-gate verdict (use --targeted-log)"
   vid=${vgreen#gate-verdict: green }
   printf '%s\n' "$vok" | cut -d' ' -f1 | grep -Fqx -- "verify:$vid" \
     || refuse "local log $llog has no verify:$vid — N ok, 0 failed line for its gate-verdict: green $vid"
+elif [ $tlog_set -eq 1 ]; then
+  # v0.1.32: bin/targeted-gate's log (exchange, game, kefa; a hotfix-/small- branch, checked in 1 and 2).
+  [ -f "$tlog" ] && [ -r "$tlog" ] || refuse "targeted log $tlog is not a readable file"
+  [ -s "$tlog" ] || refuse "targeted log $tlog is empty"
+  tcount() { c=$(grep -c -E -- "$1" "$tlog"); [ $? -le 1 ] || refuse "targeted log $tlog could not be read"; echo "$c"; }
+  tmatch() { f=$(grep -E -- "$1" "$tlog"); [ $? -le 1 ] || refuse "targeted log $tlog could not be read"; printf '%s\n' "$f"; }
+  n=$(tcount '^targeted-result: FAILED') || exit 2; [ "$n" -eq 0 ] || refuse "targeted log $tlog has $n targeted-result: FAILED line(s)"
+  n=$(tcount '^check: FAILED') || exit 2; [ "$n" -eq 0 ] || refuse "targeted log $tlog has $n check: FAILED line(s)"
+  n=$(tcount '^\[FAIL\]') || exit 2; [ "$n" -eq 0 ] || refuse "targeted log $tlog has $n [FAIL] line(s)"
+  n=$(tcount '^FAIL ') || exit 2; [ "$n" -eq 0 ] || refuse "targeted log $tlog has $n FAIL line(s)"
+  n=$(tcount '^targeted-result: ok ') || exit 2; [ "$n" -ge 1 ] || refuse "targeted log $tlog has no targeted-result: ok line"
+  n=$(tcount '^PASS  secret scan') || exit 2; [ "$n" -ge 1 ] || refuse "targeted log $tlog has no PASS  secret scan line"
+  heads=$(tmatch '^gate-head:') || exit 2
+  [ -n "$heads" ] || refuse "targeted log $tlog has no gate-head line"
+  other=$(printf '%s\n' "$heads" | grep -vx -- "gate-head: $sha" | head -n 1)
+  if [ -n "$other" ]; then
+    ov=${other#gate-head: }
+    case "$ov" in *[!0-9a-f]*|'') ov=;; esac
+    [ ${#ov} -eq 40 ] || refuse "targeted log $tlog has a gate-head line that is not 'gate-head: <40 lowercase hex>': $other"
+    refuse "targeted log $tlog is for $ov, not $sha"
+  fi
+  trees=$(tmatch '^gate-tree:') || exit 2
+  [ -n "$trees" ] || refuse "targeted log $tlog has no gate-tree: clean line"
+  dirty=$(printf '%s\n' "$trees" | grep -vx -- 'gate-tree: clean' | head -n 1)
+  [ -z "$dirty" ] || refuse "targeted log $tlog has $dirty, not gate-tree: clean"
+  vred=$(tmatch '^gate-verdict: red') || exit 2
+  [ -z "$vred" ] || refuse "targeted log $tlog has a red gate verdict ($(printf '%s\n' "$vred" | head -n 1))"
+  n=$(tcount '^gate-verdict:') || exit 2
+  [ "$n" -le 1 ] || refuse "targeted log $tlog has $n gate-verdict lines (exactly one gate-verdict: green targeted expected)"
+  vt=$(tmatch '^gate-verdict:') || exit 2
+  if [ "$vt" != 'gate-verdict: green targeted' ]; then
+    case "$vt" in 'gate-verdict: green '*) refuse "targeted log $tlog has $vt, a local-gate verdict (use --local-log)";; esac
+    refuse "targeted log $tlog has no gate-verdict: green targeted line"
+  fi
 else
   pinned='["rust / check","rust / secrets","rust / web"]'
   case "$r" in ephremdeme/exchange) chain=true;; *) chain=false;; esac
@@ -216,7 +278,7 @@ else
     *) refuse "check runs on $sha: unreadable JSON";;
   esac
 fi
-if [ $llog_set -eq 0 ]; then
+if [ $llog_set -eq 0 ] && [ $tlog_set -eq 0 ]; then
   gh_read "gh api commit status" "$tmp/status.json" api "repos/$r/commits/$sha/status"
   sv=$(jq -r 'if type == "object" and (.state | type) == "string" and (.total_count | type) == "number" then "\(.state)\t\(.total_count)" else error("x") end' "$tmp/status.json" 2>/dev/null) \
     || refuse "commit status on $sha: unreadable JSON"
