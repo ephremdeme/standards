@@ -43,6 +43,7 @@ check_ "control: ... no log written and the first command did not run" '[ ! -e "
 reset; nl; want "control: a command with a newline -> refused" 2 '^targeted-gate: refused — a command contains a newline$' sh "$TG" "$P" "$L" "$RAN" "$(printf 'echo a\necho b')"
 check_ "control: ... no log written and the first command did not run" '[ ! -e "$L" ] && [ ! -e "$CTL/ran" ]'
 reset; nl; want "control: an empty command -> refused" 2 '^targeted-gate: refused — an empty command$' sh "$TG" "$P" "$L" "$RAN" ''
+check_ "control: ... no log written and the first command did not run" '[ ! -e "$L" ] && [ ! -e "$CTL/ran" ]'
 nl; echo dirt >> "$P/README"
 want "control: a dirty tree at the start (a modified tracked file) -> refused naming it" 2 "^targeted-gate: refused — the tree of $P is not clean \(first: README\)\$" sh "$TG" "$P" "$L" "$RAN"
 check_ "control: ... no log written and nothing ran" '[ ! -e "$L" ] && [ ! -e "$CTL/ran" ]'

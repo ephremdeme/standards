@@ -208,11 +208,12 @@ elif [ $llog_set -eq 1 ]; then
   [ -z "$vred" ] || refuse "local log $llog has a red gate verdict ($(printf '%s\n' "$vred" | head -n 1))"
   vgreen=$(lmatch '^gate-verdict: green [a-z][a-z0-9_]*$') || exit 2
   [ -n "$vgreen" ] || refuse "local log $llog has no gate-verdict: green line"
-  # v0.1.32: a targeted gate's verdict never stands in for the full gate.
-  printf '%s\n' "$vgreen" | grep -Fqvx -- 'gate-verdict: green targeted' \
-    || refuse "local log $llog has gate-verdict: green targeted, a targeted-gate verdict (use --targeted-log)"
   n=$(lcount '^gate-verdict:') || exit 2
   [ "$n" -eq 1 ] || refuse "local log $llog has $n gate-verdict lines (exactly one gate-verdict: green <id> expected)"
+  # v0.1.32: a targeted gate's verdict never stands in for the full gate (after the count, so older refusals keep
+  # their messages).
+  printf '%s\n' "$vgreen" | grep -Fqvx -- 'gate-verdict: green targeted' \
+    || refuse "local log $llog has gate-verdict: green targeted, a targeted-gate verdict (use --targeted-log)"
   vid=${vgreen#gate-verdict: green }
   printf '%s\n' "$vok" | cut -d' ' -f1 | grep -Fqx -- "verify:$vid" \
     || refuse "local log $llog has no verify:$vid — N ok, 0 failed line for its gate-verdict: green $vid"
